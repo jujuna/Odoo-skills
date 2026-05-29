@@ -20,8 +20,10 @@ Load **only** the reference file(s) needed for the current task:
 | Task area | File |
 |---|---|
 | ACLs, record rules, sudo, portal, IDOR | `references/security.md` |
+| ORM correctness, recordsets, overrides, domains, transactions, multi-company | `references/orm.md` |
 | N+1 fixes, batching, cache, profiling | `references/performance.md` |
-| Python style, logging, errors, inheritance | `references/python.md` |
+| Python language style, logging, errors, inheritance | `references/python.md` |
+| Commit safety, savepoints, rollback, cache/recompute after SQL | `references/transactions.md` |
 | Field types, compute, inverse, onchange, constraints | `references/fields.md` |
 | Raw SQL, indexes, query plans, migrations | `references/sql.md` |
 | Full module skeleton / boilerplate | `references/scaffold.md` |
@@ -41,6 +43,9 @@ Load **only** the reference file(s) needed for the current task:
 - Full module request → read `scaffold.md` first
 - Write tests → read `testing.md` first
 - Fields/compute/onchange → read `fields.md` first
+- Any non-trivial Python ORM code → read `orm.md`
+- Performance-sensitive ORM code → read `orm.md` + `performance.md`
+- Manual commit/savepoint/raw SQL cache work → read `transactions.md`
 - Any code output → apply `guardrails.md` rules (internalized — load only when unsure)
 
 ---
@@ -50,9 +55,10 @@ Load **only** the reference file(s) needed for the current task:
 1. **Identify task type:** `build` | `fix` | `review` | `security` | `performance` | `migration` | `frontend` | `learn/document`
 2. **For `learn/document`:** run Documentation Workflow below
 3. **For code tasks:** load matching reference file(s) — not all files
-4. **Apply guardrails** from `references/guardrails.md`
-5. **Generate minimal, correct code** for the request scope
-6. **Run checklist** from `references/checklist.md` before returning
+4. **For Python ORM code:** optimize for batch correctness first, then readability, then micro-performance
+5. **Apply guardrails** from `references/guardrails.md`
+6. **Generate minimal, correct code** for the request scope
+7. **Run checklist** from `references/checklist.md` before returning
 
 ---
 

@@ -97,7 +97,7 @@ from odoo import Command
 Command.create({'name': 'Line 1', 'quantity': 5})  # (0, 0, vals)
 
 # Link an existing record
-Command.set(record.id)  # (4, id)
+Command.link(record.id)  # (4, id, 0)
 
 # Replace all links
 Command.set([id1, id2, id3])  # (6, 0, [ids])

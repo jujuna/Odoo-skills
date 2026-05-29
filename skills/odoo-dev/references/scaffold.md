@@ -352,20 +352,29 @@ class MyModelLine(models.Model):
         <field name="sequence">20</field>
     </record>
 
+    <record id="my_module_privilege" model="res.groups.privilege">
+        <field name="name">My Module</field>
+        <field name="category_id" ref="module_category_my_module"/>
+        <field name="sequence">20</field>
+    </record>
+
     <record id="group_my_module_user" model="res.groups">
         <field name="name">User</field>
-        <field name="category_id" ref="module_category_my_module"/>
+        <field name="privilege_id" ref="my_module_privilege"/>
         <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
     </record>
 
     <record id="group_my_module_manager" model="res.groups">
         <field name="name">Manager</field>
-        <field name="category_id" ref="module_category_my_module"/>
+        <field name="privilege_id" ref="my_module_privilege"/>
         <field name="implied_ids" eval="[(4, ref('group_my_module_user'))]"/>
-        <field name="users" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
+        <field name="user_ids" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
     </record>
 </odoo>
 ```
+
+**v19 note:** `res.groups` no longer has `category_id` — the category lives on the new `res.groups.privilege` model that sits between `ir.module.category` and `res.groups`. The field name for default users is `user_ids`, not `users`.
+
 
 ---
 

@@ -1,5 +1,9 @@
 # Python Best Practices — Odoo 19+ (Python 3.10+)
 
+This file covers the Python language layer for Odoo code. For ORM-specific
+contracts (recordsets, CRUD overrides, domains, transactions, multi-company),
+load `references/orm.md` first.
+
 ## Table of Contents
 
 1. [Type Hints in Odoo](#1-type-hints-in-odoo)
@@ -15,6 +19,11 @@
 11. [ORM Method Overrides](#11-orm-method-overrides)
 12. [Context Patterns](#12-context-patterns)
 13. [Dangerous Antipatterns](#13-dangerous-antipatterns)
+14. [Odoo Python Standards](#14-odoo-python-standards)
+15. [Production Python Review Standard](#15-production-python-review-standard)
+16. [Fast, Clean, High-Standard Python](#16-fast-clean-high-standard-python)
+17. [Safe and Performant by Default](#17-safe-and-performant-by-default)
+18. [Caching Model Methods (ormcache)](#18-caching-model-methods-ormcache)
 
 ---
 
@@ -60,10 +69,9 @@ memory at once. Critical for cron jobs and data migration.
 
 ```python
 def _iter_pending_records(self, batch_size: int = 500):
-    """Yield pending records in batches for memory-efficient processing.
+    """Yield pending records for read-only processing.
 
-    Yields:
-        Recordset: A batch of records up to batch_size.
+    Use offset only when the loop does not mutate records out of the domain.
     """
     offset = 0
     while True:
@@ -78,12 +86,26 @@ def _iter_pending_records(self, batch_size: int = 500):
         yield batch
         offset += batch_size
 
+def _iter_mutating_pending_records(self, batch_size: int = 500):
+    """Yield first-page batches for mutating/resumable processing."""
+    while True:
+        batch = self.search(
+            [('state', '=', 'pending')],
+            limit=batch_size,
+            order='id',
+        )
+        if not batch:
+            return
+        yield batch
+
 def _cron_process_all(self):
-    """Process all pending records in memory-safe batches."""
-    for batch in self._iter_pending_records(batch_size=200):
+    """Process all pending records in memory-safe, resumable batches."""
+    for batch in self._iter_mutating_pending_records(batch_size=200):
         batch._process_batch()
-        self.env.cr.commit()
-        self.env.invalidate_all()
+        # Commit only in resumable cron/import/migration jobs, never in requests.
+        if self._can_commit():
+            self.env.cr.commit()
+            self.env.invalidate_all()
 ```
 
 ### Use `any()` / `all()` for short-circuit checks:
@@ -190,6 +212,22 @@ totals = self.env['sale.order.line']._read_group(
     aggregates=['price_total:sum'],
 )
 totals_map = {order.id: total for order, total in totals}
+```
+
+### Iterate by item; use enumerate/zip:
+```python
+# BAD — index gymnastics
+for i in range(len(records)):
+    line_no = i + 1
+    record = records[i]
+
+# GOOD — enumerate for index + value
+for line_no, record in enumerate(records, start=1):
+    ...
+
+# GOOD — zip to walk parallel sequences together
+for record, vals in zip(records, vals_list):
+    ...
 ```
 
 ---
@@ -335,6 +373,7 @@ sorted_data = sorted(data, key=itemgetter('amount'), reverse=True)
 ### Walrus operator (Python 3.8+, common in 3.10+):
 ```python
 # Useful in Odoo for conditional processing
+self.ensure_one()
 if partner := self.partner_id:
     partner.message_post(body=_("New order created."))
 
@@ -508,6 +547,9 @@ class DeliveryOrder(models.Model):
 
 ## 11. ORM Method Overrides
 
+For full ORM contracts, use `references/orm.md`. This section is the short
+Python syntax reminder.
+
 ### create() — always use `@api.model_create_multi`:
 ```python
 @api.model_create_multi
@@ -608,6 +650,12 @@ self.with_context(default_partner_id=partner.id).action_open_wizard()
 self.with_context(allowed_company_ids=[company_1.id, company_2.id])
 ```
 
+**Rules:**
+- Context is immutable from the caller's point of view; never mutate `self.env.context`.
+- Prefer explicit context keys with a module prefix for custom behavior.
+- Do not use context as hidden business state when a real field or argument is clearer.
+- Preserve `allowed_company_ids` unless intentionally changing company scope.
+
 ---
 
 ## 13. Dangerous Antipatterns
@@ -680,3 +728,484 @@ domain = ast.literal_eval(user_provided_string)
 import json
 domain = json.loads(user_provided_string)
 ```
+
+### Module-level mutable state:
+```python
+# BUG — shared across requests/workers, not thread-safe, never invalidated
+_CACHE = {}
+
+def _get_thing(self, key):
+    if key not in _CACHE:
+        _CACHE[key] = self._compute_thing(key)
+    return _CACHE[key]
+
+# CORRECT — use ormcache (registry-aware, invalidated on data change) — see section 18.
+# Module-level names should be immutable constants only.
+```
+
+---
+
+## 14. Odoo Python Standards
+
+### Imports
+
+```python
+import logging
+from collections import defaultdict
+
+from odoo import _, api, fields, models, Command
+from odoo.exceptions import AccessError, UserError, ValidationError
+from odoo.fields import Domain
+from odoo.tools import float_compare, float_is_zero
+
+_logger = logging.getLogger(__name__)
+```
+
+**Rules:**
+- All imports at module top — never import inside a method by default. The only exceptions are breaking a circular import or deferring a heavy/optional dependency; mark those with a short reason / `# noqa: PLC0415`.
+- Standard library imports first, then Odoo imports, then local module imports.
+- Import `Command` when writing x2many values.
+- Import `Domain` when composing dynamic domains.
+- Import float helpers when comparing quantities, currencies, or UoM values.
+
+### Comments and docstrings
+
+Write self-explanatory code; lean on naming, not narration.
+
+```python
+# GOOD — one-line docstring states intent; no comment restating the code
+def _prepare_invoice_values(self):
+    """Build account.move values for this order."""
+    self.ensure_one()
+    return {'partner_id': self.partner_id.id, 'move_type': 'out_invoice'}
+
+# AVOID — multi-paragraph docstring for a trivial method, comments narrating obvious code
+def _prepare_invoice_values(self):
+    """
+    This method prepares and returns the dictionary of values that will
+    later be used to create the customer invoice for the current order...
+    """
+    self.ensure_one()                       # make sure it is a single record
+    return {'partner_id': self.partner_id.id}  # return the values dict
+```
+
+**Rules:**
+- Docstrings: one short line stating what the method does. Expand only for non-obvious behavior (transaction/security/performance choices, surprising side effects).
+- Comments: only when naming cannot make the code self-explanatory. Keep them short and explain *why*, not *what*.
+- Do not narrate obvious code or restate the method name in prose.
+- Do not add docstrings, comments, or type annotations to code you did not change.
+
+### Method shape
+
+```python
+def action_validate(self):
+    """Validate selected records."""
+    ready = self.filtered_domain([('state', '=', 'draft')])
+    if not ready:
+        return True
+
+    ready._check_validate_allowed()
+    ready.write({'state': 'validated'})
+    for record in ready:
+        record.message_post(body=_("Validated."))
+    return True
+```
+
+**Rules:**
+- Keep methods short enough to review: select, validate, prepare, write, side effects.
+- Name helpers after intent: `_check_*`, `_prepare_*_values`, `_get_*_domain`, `_sync_*`.
+- Return Odoo-native values: `True`, action dict, recordset, values dict, or primitive data.
+- Do not mix external API payload construction, ORM writes, and UI action building in one large method.
+
+### Exceptions
+
+```python
+if not self.env.user.has_group('module.group_manager'):
+    raise AccessError(_("Only managers can approve this document."))
+
+if record.state != 'draft':
+    raise UserError(_("Only draft records can be approved."))
+
+if float_is_zero(record.quantity, precision_rounding=record.product_uom_id.rounding):
+    raise ValidationError(_("Quantity must be greater than zero."))
+```
+
+**Rules:**
+- `AccessError` for permissions.
+- `UserError` for recoverable business-flow blockers.
+- `ValidationError` for invalid data/invariants.
+- Preserve original exceptions when they indicate security or programming errors.
+
+### Dates, datetimes, and floats
+
+```python
+today = fields.Date.context_today(self)
+now_utc = fields.Datetime.now()
+
+if float_compare(qty_done, qty_expected, precision_rounding=uom.rounding) < 0:
+    ...
+```
+
+**Rules:**
+- Use `fields.Date.context_today(record)` for user/company-context dates.
+- Use `fields.Datetime.now` as a default callable; store datetimes in UTC.
+- Never compare floats directly for quantities/currency/UoM.
+- Use currency rounding for money and UoM rounding for quantities.
+
+### External calls
+
+```python
+def _send_payload(self, payload):
+    """Send payload to external service and return parsed response."""
+    self.ensure_one()
+    try:
+        response = self._client().post(payload)
+        response.raise_for_status()
+    except TimeoutError as exc:
+        raise UserError(_("The external service timed out. Try again later.")) from exc
+```
+
+**Rules:**
+- Keep network calls out of compute/onchange/constraints.
+- Use timeouts and idempotency keys for retryable calls.
+- Persist enough status to retry safely from cron.
+- Never log credentials, tokens, full payloads with PII, or raw response bodies from sensitive services.
+
+### Constants and tooling
+
+```python
+# BAD — magic numbers/strings scattered through logic
+if order.amount_total > 1000 and order.state == 'sale':
+    ...
+
+# GOOD — named constants; frozenset/tuple for fixed collections
+LARGE_ORDER_THRESHOLD = 1000.0
+CONFIRMED_STATES = frozenset(('sale', 'done'))
+
+if order.amount_total > LARGE_ORDER_THRESHOLD and order.state in CONFIRMED_STATES:
+    ...
+```
+
+**Rules:**
+- Name magic numbers/strings as module-level constants; use `frozenset`/`tuple` for fixed sets, not mutable `list`/`dict`.
+- Module-level names must be immutable (see section 13 on global mutable state).
+- Format and lint with `ruff format` + `ruff check` before committing — keep style machine-enforced, not hand-argued.
+
+---
+
+## 15. Production Python Review Standard
+
+Use this checklist before considering Odoo Python "high standard":
+
+- The method is honest about recordset size and tested with multiple records when multi is supported.
+- Data access is batched; helpers return maps/recordsets instead of forcing caller loops.
+- Domains are composed with `Domain` when dynamic.
+- x2many commands use `Command`.
+- Exceptions are typed: `AccessError`, `UserError`, `ValidationError`, or a re-raised original.
+- Logging is lazy and contains record model/id/reference, not sensitive payloads.
+- External calls are isolated from compute/onchange/constraints and are retry-safe.
+- Manual commits are absent unless the method is a documented resumable worker.
+- Raw SQL is justified, parameterized, flushed/invalidated, and recompute-aware.
+- Helpers are named by intent and small enough to review without scrolling through unrelated concerns.
+
+---
+
+## 16. Fast, Clean, High-Standard Python
+
+Fast Odoo Python is usually not clever Python. It is code that avoids unnecessary
+work, keeps data shapes simple, and lets the ORM/database do the heavy lifting.
+
+### Default standard
+
+```python
+from collections import defaultdict
+
+
+def _prepare_lines_by_product(self):
+    """Return order lines grouped by product without extra searches."""
+    lines_by_product = defaultdict(lambda: self.env['sale.order.line'])
+    for line in self.order_line:
+        if line.display_type:
+            continue
+        lines_by_product[line.product_id] |= line
+    return lines_by_product
+```
+
+**Rules:**
+- Prefer simple loops when they avoid repeated ORM calls or unclear chained expressions.
+- Use early `continue` / `return` to avoid nested branches.
+- Build maps/sets once; do not recompute the same lookup in every iteration.
+- Keep recordsets as recordsets until IDs are required for SQL, RPC, or serialization.
+- Avoid "smart" abstractions unless they remove real duplication or make batch behavior safer.
+
+### Avoid unnecessary allocations
+
+```python
+# BAD — builds a full list just to check existence
+has_errors = bool([line for line in self.line_ids if line.state == 'error'])
+
+# GOOD — stops at first match
+has_errors = any(line.state == 'error' for line in self.line_ids)
+
+# BAD — builds list then set
+partner_ids = set([line.partner_id.id for line in self.line_ids])
+
+# GOOD — one pass
+partner_ids = {line.partner_id.id for line in self.line_ids if line.partner_id}
+```
+
+**Rules:**
+- Use generator expressions for `any()`, `all()`, `sum()`, `min()`, `max()`.
+- Use set/dict comprehensions for membership and lookup.
+- Do not call `list()` unless you need indexing, reuse, sorting, mutation, or serialization.
+- Do not sort unless the order is user-visible, deterministic behavior requires it, or SQL cannot do it.
+
+### Cache local references in hot code
+
+```python
+def _prepare_payloads(self):
+    """Prepare external payloads with stable local lookups."""
+    company = self.env.company
+    currency = company.currency_id
+    payloads = {}
+    for record in self:
+        payloads[record.id] = {
+            'name': record.name,
+            'company_vat': company.vat,
+            'currency': currency.name,
+        }
+    return payloads
+```
+
+**Rules:**
+- Store repeated environment/model references in local variables in hot loops.
+- Create contextualized recordsets once: `Model = self.env['x.model'].with_context(...)`.
+- Do not call `with_context()`, `sudo()`, `with_company()`, or `browse()` repeatedly inside loops when one outer recordset works.
+- Use `records.fetch([...])` before loops that read a known field set on large recordsets.
+
+### Push filtering and aggregation down
+
+```python
+# BAD — loads all records then filters in Python
+late = self.search([]).filtered(lambda rec: rec.state == 'late' and rec.company_id == self.env.company)
+
+# GOOD — database filters first
+late = self.search([
+    ('state', '=', 'late'),
+    ('company_id', '=', self.env.company.id),
+])
+```
+
+**Rules:**
+- Use domains for filtering large tables.
+- Use `_read_group()` for counts/sums per parent.
+- Use `search_fetch()` when you will immediately read known fields from search results.
+- Use Python-side `filtered()` only for small/already-loaded sets or conditions not expressible as a domain.
+
+### Keep helper outputs efficient
+
+```python
+def _get_existing_refs(self, refs):
+    """Return existing external refs as a set for O(1) membership checks."""
+    if not refs:
+        return set()
+    records = self.search_fetch([('external_ref', 'in', list(refs))], ['external_ref'])
+    return set(records.mapped('external_ref'))
+```
+
+**Rules:**
+- Return `set` for membership checks.
+- Return `dict` for id/ref to value lookups.
+- Return recordsets when caller needs ORM operations.
+- Avoid returning lists of single-use dicts when a map makes the next step O(1).
+
+### Avoid hidden expensive work
+
+```python
+# BAD — repeated relational traversal inside loop body
+for line in lines:
+    if line.order_id.partner_id.commercial_partner_id.country_id.code == 'GE':
+        ...
+
+# GOOD — prefetch known chains, then loop
+lines.mapped('order_id.partner_id.commercial_partner_id.country_id.code')
+for line in lines:
+    if line.order_id.partner_id.commercial_partner_id.country_id.code == 'GE':
+        ...
+```
+
+**Rules:**
+- Be suspicious of repeated relational chains in large loops.
+- Do not call `mapped()` inside another loop unless the inner set is tiny.
+- Avoid reading Binary/Html/large Text fields unless needed.
+- Avoid `read()` when normal field access or `fetch()` is enough.
+
+### High-standard means no unnecessary code
+
+**Remove or avoid:**
+- One-line helpers used once that hide simple logic.
+- Broad `try/except Exception` around code that should fail loudly.
+- Dead context flags, unused variables, unused imports, placeholder comments.
+- Recomputing values that can be prepared once before the loop.
+- Logging every record in large batches unless diagnosing a failure.
+- Premature raw SQL when a batched ORM pattern is clear and fast enough.
+
+**Keep:**
+- Clear names over clever abbreviations.
+- Small methods with one responsibility.
+- Explicit data shapes: `*_by_id`, `*_by_company`, `*_vals_list`.
+- Comments only for non-obvious transaction/security/performance choices.
+
+---
+
+## 17. Safe and Performant by Default
+
+The best Odoo Python fails early, validates once, batches work, and avoids
+surprising side effects. Safety and performance usually improve together.
+
+### Fail before expensive work
+
+```python
+def action_post_to_service(self):
+    """Validate records before preparing payloads or calling services."""
+    invalid = self.filtered(lambda rec: rec.state != 'ready')
+    if invalid:
+        raise UserError(_("Only ready records can be sent."))
+
+    missing_partner = self.filtered(lambda rec: not rec.partner_id)
+    if missing_partner:
+        raise UserError(_("Partner is required before sending."))
+
+    payloads = self._prepare_service_payloads()
+    return self._enqueue_service_payloads(payloads)
+```
+
+**Rules:**
+- Validate state, required fields, access, and company before payload creation.
+- Fail before external API calls, attachments, reports, or expensive aggregation.
+- Do not partially write records before validation unless the flow is explicitly resumable.
+
+### Avoid quadratic loops
+
+```python
+# BAD — O(records * lines)
+for order in orders:
+    order_lines = lines.filtered(lambda line: line.order_id == order)
+    order.total_qty = sum(order_lines.mapped('product_uom_qty'))
+
+# GOOD — one grouping pass
+qty_by_order = defaultdict(float)
+for line in lines:
+    qty_by_order[line.order_id.id] += line.product_uom_qty
+for order in orders:
+    order.total_qty = qty_by_order[order.id]
+```
+
+**Rules:**
+- Do not filter the same large recordset inside a loop.
+- Build `dict` / `defaultdict` / `set` once, then do O(1) lookups.
+- If the data is in the database and grouped totals are needed, prefer `_read_group()`.
+
+### Validate before sudo
+
+```python
+def _get_private_attachment_for_portal(self, token):
+    """Return sudoed attachment only after public access is proven."""
+    self.ensure_one()
+    if not self._is_valid_access_token(token):
+        raise AccessError(_("Invalid access token."))
+
+    # sudo justified: ownership/token was validated above.
+    return self.attachment_id.sudo()
+```
+
+**Rules:**
+- Never use `sudo()` to make code "work" before understanding access rules.
+- Validate user-controlled IDs in non-sudo mode first.
+- Keep sudoed recordsets narrow and short-lived.
+- Do not pass broad sudoed recordsets into helper methods that may leak data.
+
+### Keep writes intentional
+
+```python
+def _mark_processed(self):
+    """Mark records processed in one write."""
+    to_process = self.filtered_domain([('state', '=', 'ready')])
+    if to_process:
+        to_process.write({'state': 'processed'})
+```
+
+**Rules:**
+- Write once per recordset or grouped recordset.
+- Do not assign multiple fields one by one when one `write()` works.
+- Do not write in `_prepare_*`, `_get_*`, or `_check_*` helpers.
+- Do not write in compute/onchange methods except assigning the computed/onchange target fields.
+
+### Keep inputs and outputs boring
+
+```python
+def _prepare_vals_by_record_id(self):
+    """Return primitive values keyed by source record id."""
+    return {
+        record.id: {
+            'name': record.display_name,
+            'partner_id': record.partner_id.id,
+        }
+        for record in self
+    }
+```
+
+**Rules:**
+- Prefer primitive dict/list/set payloads at integration boundaries.
+- Prefer recordsets inside ORM/business logic.
+- Name output shape in the method name: `*_by_id`, `*_by_record`, `*_vals_list`.
+- Avoid returning mixed shapes like `False | dict | recordset`; they create defensive code everywhere.
+
+### Safe performance review gates
+
+Before approving Python code, reject it if it has:
+
+- `search()`, `search_count()`, `browse(id)`, `with_context()`, `sudo()`, or external API calls inside an avoidable loop.
+- Nested loops over recordsets where a `dict`, `set`, `grouped()`, or `_read_group()` would work.
+- `ensure_one()` in a method reachable from multi-record actions without a clear reason.
+- `try/except Exception` that hides programming, access, or transaction errors.
+- `sudo()` before access/company/ownership validation.
+- Manual commit without `transactions.md` reasoning.
+- Repeated relational chains in a hot path without prefetch/fetch.
+- Large `mapped()` / `filtered()` use where a domain or `_read_group()` would be better.
+- Helpers that do hidden writes or external calls despite being named `_get_*` or `_prepare_*`.
+
+The target is boring, fast, safe code: validate first, batch data access, write
+intentionally, and keep side effects visible.
+
+---
+
+## 18. Caching Model Methods (ormcache)
+
+For pure, frequently-called, rarely-changing lookups (config resolution, permission maps, parsed metadata), cache the result with Odoo's registry-aware cache — never `functools.lru_cache` / `functools.cache`.
+
+```python
+from odoo.tools import ormcache
+
+
+class ResCompany(models.Model):
+    _inherit = 'res.company'
+
+    @ormcache('self.env.company.id', 'feature_code')
+    def _get_feature_setting(self, feature_code):
+        """Return a cached primitive — never a recordset."""
+        param = self.env['ir.config_parameter'].sudo().get_param(f'mymod.{feature_code}')
+        return param or False
+```
+
+### Why not `lru_cache`
+- `lru_cache`/`cache` on a model method keys on `self`, pinning records and an environment/cursor that later closes — stale data across transactions and `psycopg2.InterfaceError` when the cached value is reused.
+- It is process-global, never invalidated when the data changes, and not cleared on module upgrade.
+
+### `ormcache` rules
+- Arguments are string expressions over the method signature; they build the key (which always also includes `self._name` and the method). Examples: `'model_name'`, `'self.env.uid'`, `'self.env.company.id'`.
+- **Never return a recordset** — return ids, dicts, tuples, or scalars, and `browse()` again in the caller. A cached recordset raises `psycopg2.InterfaceError` once its cursor closes.
+- Cache only pure functions of the key: no side effects, and no context-sensitive result unless that context value is part of the key.
+- Invalidate when the underlying data changes: `self.env.registry.clear_cache()` (or `clear_cache('name')` for one bucket, `clear_all_caches()` for everything).
+- `@ormcache(skiparg=...)` and `@ormcache_context(...)` are **deprecated since 19.0** — use `@ormcache(...)` and put context values in the key directly, e.g. `@ormcache('self.env.context.get("lang")')`.
+- Use `@ormcache(..., cache='name')` to put an entry in a named bucket you can invalidate independently.

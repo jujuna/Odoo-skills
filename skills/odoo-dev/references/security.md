@@ -17,6 +17,7 @@
 13. [@api.ondelete](#13-apiondelete)
 14. [Data File Security](#14-data-file-security)
 15. [Sensitive Data Handling](#15-sensitive-data-handling)
+16. [Programmatic Access Checks (v19)](#16-programmatic-access-checks-v19)
 
 ---
 
@@ -47,34 +48,44 @@ Access Granted
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Module category -->
+    <!-- Module category (top-level) -->
     <record id="module_category_my_module" model="ir.module.category">
         <field name="name">My Module</field>
         <field name="description">Manage my module operations</field>
         <field name="sequence">20</field>
     </record>
 
+    <!-- Privilege (v19+ intermediary between category and groups) -->
+    <record id="my_module_privilege" model="res.groups.privilege">
+        <field name="name">My Module</field>
+        <field name="category_id" ref="module_category_my_module"/>
+        <field name="sequence">20</field>
+    </record>
+
     <!-- User group -->
     <record id="group_my_module_user" model="res.groups">
         <field name="name">User</field>
-        <field name="category_id" ref="module_category_my_module"/>
+        <field name="privilege_id" ref="my_module_privilege"/>
         <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
     </record>
 
     <!-- Manager group (inherits User) -->
     <record id="group_my_module_manager" model="res.groups">
         <field name="name">Manager</field>
-        <field name="category_id" ref="module_category_my_module"/>
+        <field name="privilege_id" ref="my_module_privilege"/>
         <field name="implied_ids" eval="[(4, ref('group_my_module_user'))]"/>
-        <field name="users" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
+        <field name="user_ids" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
     </record>
 </odoo>
 ```
 
-**Rules:**
-- Manager always implies User
-- Admin/root users should be in Manager group by default
-- Use `implied_ids` to create group hierarchy (never duplicate permissions)
+**Rules (v19):**
+- `res.groups` no longer has `category_id` — it has `privilege_id` linking to `res.groups.privilege`, which in turn has `category_id`. Three-level hierarchy: `ir.module.category` ▶ `res.groups.privilege` ▶ `res.groups`.
+- Field name for default users on a group is `user_ids`, not `users`.
+- Manager always implies User.
+- Admin/root users should be in Manager group by default.
+- Use `implied_ids` to create group hierarchy (never duplicate permissions).
+- Reference example in core: [`addons/account/security/account_security.xml`](../../../addons/account/security/account_security.xml) — uses `res_groups_privilege_accounting` as the privilege bridge.
 
 ---
 
@@ -318,6 +329,7 @@ class MyModel(models.Model):
 | Broken Access | Public method calls `sudo()` | Validate group before sudo |
 | IDOR | `browse(user_provided_id)` without check | Call `check_access('read')` |
 | XSS in QWeb | `t-raw` with user input | Use `t-esc` or sanitize |
+| Stored XSS via SVG | Uploading an SVG with an embedded script | `Binary`/`Image` fields block SVG for non-admin users by default — keep it; sanitize any custom upload endpoint that bypasses the field |
 | Mass Assignment | `write(request.params)` | Whitelist allowed fields |
 | Cross-Company Leak | Missing company record rule | Always add company rule |
 | Path Traversal | User-controlled file path | Validate / sanitize paths |
@@ -494,3 +506,41 @@ api_token = fields.Char(
     copy=False,
 )
 ```
+
+---
+
+## 16. Programmatic Access Checks (v19)
+
+When you need to enforce ACLs + record rules in Python (controllers, sudo flows, RPC entry points), use the v19 access API. It replaces the split `check_access_rights()` (ACL) / `check_access_rule()` (record rules) pair with one operation-based interface.
+
+```python
+# Raise AccessError if the user cannot perform the operation on every record in self
+records.check_access('read')
+
+# Boolean variant — same logic, no exception
+if records.has_access('write'):
+    ...
+
+# Drop the records the user is not allowed to touch, keep the rest
+allowed = records._filtered_access('unlink')
+allowed.unlink()
+
+# Model-level check (no specific records): use an empty recordset
+self.env['my.model'].browse().check_access('create')
+```
+
+**Rules:**
+- `operation` is one of `'read'`, `'write'`, `'create'`, `'unlink'`.
+- `check_access(op)` raises `AccessError`; `has_access(op)` returns a bool; `_filtered_access(op)` returns the subset the user may act on.
+- All three return early (allow everything) under superuser (`self.env.su` / `sudo()`) — they check the *current* user, so call them on the non-sudoed recordset.
+- For IDOR protection in portal/public controllers, validate ownership and call `check_access('read')` on the real recordset before exposing data. Return 404 (not 403) on mismatch.
+- `create()`, `write()`, and `unlink()` already call `check_access(...)` internally; do not re-check unless you bypass the ORM (raw SQL) or sudo around it.
+
+**Deprecated forms (since 18.0):**
+
+| Deprecated | Replacement |
+|---|---|
+| `check_access_rights(op, raise_exception=True)` | `check_access(op)` |
+| `check_access_rights(op, raise_exception=False)` | `has_access(op)` |
+| `check_access_rule(op)` | `check_access(op)` |
+| `_filter_access_rules(op)` / `_filter_access_rules_python(op)` | `_filtered_access(op)` |

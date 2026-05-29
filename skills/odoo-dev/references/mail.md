@@ -112,6 +112,9 @@ When a tracked field changes, Odoo creates a `mail.tracking.value` record and po
 
 ## 4. message_post()
 
+`message_post()` is singleton-only. Loop explicitly when posting the same audit
+entry on multiple records.
+
 ### Post a note (internal, no notification)
 
 ```python
@@ -145,6 +148,7 @@ record.message_post_with_source(
 ### Attach a file to a message
 
 ```python
+self.ensure_one()
 attachment = self.env['ir.attachment'].create({
     'name': 'report.pdf',
     'datas': base64_content,
@@ -236,6 +240,7 @@ Custom subtypes let followers subscribe to specific event types.
 Use in message_post:
 
 ```python
+self.ensure_one()
 self.message_post(
     body=_("Order confirmed."),
     subtype_xmlid='my_module.mt_order_confirmed',
@@ -368,6 +373,7 @@ def _cron_process_records(self):
 _logger.info("Order %s confirmed by user %s", self.name, self.env.user.name)
 
 # GOOD — visible in the record's chatter
+self.ensure_one()
 self.message_post(
     body=_("Order confirmed by %s.", self.env.user.name),
     subtype_xmlid='mail.mt_note',
@@ -407,5 +413,6 @@ self.with_context(tracking_disable=True).create(vals_list)
 self.message_post(body="Internal note", subtype_xmlid='mail.mt_comment')
 
 # GOOD — use mt_note for internal, mt_comment for notifications
+self.ensure_one()
 self.message_post(body="Internal note", subtype_xmlid='mail.mt_note')
 ```

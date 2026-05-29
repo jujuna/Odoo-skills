@@ -85,6 +85,8 @@ def _cron_process_pending(self):
 
 ## 3. Batch Processing
 
+For full commit rules, load `references/transactions.md`.
+
 ### Process in chunks with commit
 
 ```python
@@ -115,19 +117,21 @@ def _cron_process_large_batch(self):
                 _logger.exception("Failed to process %s", record.id)
                 record.write({'state': 'error'})
 
-        # Commit batch and clear cache
-        self.env.cr.commit()
-        self.env.invalidate_all()
+        # Commit only when this cron is allowed to create resumable boundaries.
+        if self._can_commit():
+            self.env.cr.commit()
+            self.env.invalidate_all()
 ```
 
 ### Why commit + invalidate
 
 ```python
 # After commit:
-self.env.cr.commit()
-# Cache may reference data from before the commit.
-# If another transaction modified rows, our cache is stale.
-self.env.invalidate_all()  # MANDATORY after commit
+if self._can_commit():
+    self.env.cr.commit()
+    # Cache may reference data from before the commit.
+    # If another transaction modified rows, our cache is stale.
+    self.env.invalidate_all()  # MANDATORY after commit
 ```
 
 ---
@@ -279,8 +283,9 @@ def _cron_process_all(self):
         for record in chunk.with_prefetch():
             record._process_single()
 
-        self.env.cr.commit()
-        self.env.invalidate_all()
+        if self._can_commit():
+            self.env.cr.commit()
+            self.env.invalidate_all()
 ```
 
 ### Avoid loading binary fields
@@ -363,8 +368,9 @@ self.env.cr.commit()
 print(record.state)  # may return old value!
 
 # GOOD
-self.env.cr.commit()
-self.env.invalidate_all()
+if self._can_commit():
+    self.env.cr.commit()
+    self.env.invalidate_all()
 ```
 
 ### No error handling

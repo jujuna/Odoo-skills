@@ -1,14 +1,13 @@
 # Documentation Template — Odoo Business Module
 
-Use this exact structure for every module documentation file.
-Replace all `<placeholders>` with real content. Delete sections that genuinely don't apply.
-Every code reference MUST be a markdown link to an actual file you read.
+Use this structure for every module documentation file.
+Replace all `<placeholders>` with real content. Delete sections that don't apply.
 
-The documentation serves two audiences simultaneously:
-1. **Business learner** — someone learning Odoo flows, wanting to understand when/how/why to use features
-2. **Technical developer** — someone who needs code references, field definitions, and method details
+The documentation serves one primary goal: **help the reader understand the module** —
+what it does, why it exists, how it works end-to-end, and when to use it.
 
-Front-load business context before technical details. Every feature should answer: "When would I use this? What problem does it solve? Show me a real example."
+This is NOT a field catalog or API reference. Write it like you're explaining the module
+to a smart colleague who's never seen it before.
 
 ---
 
@@ -16,230 +15,139 @@ Front-load business context before technical details. Every feature should answe
 # <Module Name>
 
 > **Module:** `<technical_module_name>` | **Path:** [`<addons/module_name>/`](<addons/module_name>/)
-> **Odoo Apps category:** <Sales / Inventory / Accounting / HR / ...>
 
-## What It Does
+## What It Does & Why It Exists
 
-<3–5 sentences. Focus on business purpose: what problem it solves, who uses it, what the output is.
-No vague statements. Be specific about the business outcome.>
-
----
-
-## When to Use This Module
-
-<Answer clearly: What business need triggers the use of this module? Who benefits from it (which roles/departments)?
-Compare briefly with alternative approaches if relevant — e.g., "Use X for simple cases, this module for Y.">
-
-### Best For
-- <Scenario 1 — concrete business situation where this module is the right choice>
-- <Scenario 2>
-
-### Not For
-- <Scenario where a different module or approach is better — and which one>
+<5-8 sentences. What business problem does this solve? Who uses it? What's the end result?
+Be concrete — name the roles, the documents produced, the decisions it supports.
+A reader should finish this section knowing whether this module is relevant to them.>
 
 ---
 
-## Real-World Use Cases
+## The Big Picture — How It Works
 
-<Concrete, named scenarios that show how real businesses use this module. Each use case should have:
-a situation, what the user does in Odoo, and what the outcome is.>
+> Explain the end-to-end flow from the user's perspective. Walk through what happens
+> from the moment someone starts using this module to the final business outcome.
 
-### Use Case 1: <Descriptive Name>
+```
+<Visual flow: states, transitions, what triggers each step>
+<Step 1>  -->  <Step 2>  -->  <Step 3>  -->  <Final Outcome>
+```
+
+<Narrative explanation of the flow. Connect the steps. Explain the "why" behind each transition.
+What decisions does the user make at each point? What does Odoo do automatically?>
+
+### Key Decision Points
+- **<Decision>:** <What the user chooses and how it changes the flow>
+- **<Decision>:** <...>
+
+---
+
+## When to Use It (and When Not To)
+
+### This module is for:
+- <Concrete scenario — name roles, company types, situations>
+- <...>
+
+### Use something else when:
+- <Scenario> — use `<other_module>` instead because <reason>
+- <...>
+
+---
+
+## Real-World Scenarios
+
+### Scenario 1: <Descriptive Name>
 **Situation:** <Who has what problem? Be specific — role, company type, context.>
-**In Odoo:** <Step-by-step what they do — menu paths, buttons, fields they fill.>
-**Result:** <What business outcome they get — reports, documents, automation.>
+**What they do:** <Walk through the steps in plain language — menu paths, buttons, choices.>
+**What happens:** <Business outcome + what Odoo creates/changes behind the scenes.>
 
-### Use Case 2: <Descriptive Name>
-**Situation:** <...>
-**In Odoo:** <...>
-**Result:** <...>
-
-<Add as many use cases as needed to cover the module's main features. Each major feature should appear in at least one use case.>
+### Scenario 2: <Descriptive Name>
+<Same structure. Cover the module's main features through scenarios.>
 
 ---
 
-## How-To Scenarios
+## How Things Work Under the Hood
 
-<Practical "I want to do X, how?" guides. These are task-oriented — the reader has a goal and needs steps.
-Each scenario should be self-contained and actionable.>
+> Only include what helps understanding. Skip obvious boilerplate.
+> This section exists to answer "but how does it actually work?" — not to list every field.
 
-### How to <accomplish task 1>
-1. <Step with exact menu path or button name>
-2. <Step — mention which fields to fill and why>
-3. <Step — what happens after, what to verify>
+### Core Logic
+<Explain the key mechanisms. What methods drive the main flow? What's the important
+business logic? Focus on the non-obvious parts — the things that would surprise someone
+or that they need to know to work with this module effectively.>
 
-**Why this works:** <Brief explanation of what Odoo does behind the scenes — connect to the technical model/method if relevant.>
+- **<method_name>()** ([`file.py:nn`](<path/file.py#Lnn>)) — <what it does and why it matters>
+- <Only list methods that are essential to understanding the flow>
 
-### How to <accomplish task 2>
-1. <...>
+### Important Fields (only the ones that matter)
+<Don't list every field. Only mention fields that:
+- Control business logic (selection fields that change flow)
+- Are non-obvious (computed fields with surprising behavior)
+- Are decision points the user needs to understand>
 
-<Cover the most common tasks users need to perform with this module.>
+- `<field>` — <what it controls and why you'd care>
+
+---
+
+## Configuration & Settings
+
+<For each setting, explain what behavior it changes — not just the field metadata.
+Write it as: "Enable X to get Y behavior. Without it, Z happens instead.">
+
+- **<Setting UI Name>** (Settings -> <path>) — <what changes when you flip it>
 
 ---
 
 ## Dependencies
 
-### Requires (must be installed)
-| Module | Why |
+| Requires | Why |
 |---|---|
-| `<module>` | <reason — e.g., "provides res.partner, used for customer records"> |
+| `<module>` | <what it provides that this module needs — in plain language> |
 
-### Optional Integrations
-| Module | What it enables |
+| Works With (optional) | What It Adds |
 |---|---|
-| `<module>` | <e.g., "enables invoice generation from orders"> |
-
-### Provides To (what other modules consume from this one)
-| Consumers | What they use |
-|---|---|
-| `<module>` | <e.g., "reads stock.move for COGS journal entries"> |
+| `<module>` | <what new capability appears when both are installed> |
 
 ---
 
-## Business Flow
+## Gotchas & Non-Obvious Behavior
 
-> The end-to-end process from user action to business outcome.
-
-```
-<State/Step 1>  →  <State/Step 2>  →  <State/Step 3>  →  <Final State>
-     ↓                   ↓                   ↓
-<What happens>    <What happens>    <What happens>
-```
-
-### States (if stateful)
-| State | Meaning | Can Transition To |
-|---|---|---|
-| `draft` | <meaning> | `confirmed`, `cancelled` |
-
-### Key Triggers
-- **<User action / button>** → calls `<method>()` → <what happens>
-- **<Scheduled action>** → triggers `<method>()` → <what happens>
-
----
-
-## Key Models
-
-### `<model.name>` — <short description>
-> [`<models/filename.py>`](<addons/module/models/filename.py>)
-
-| Field | Type | Purpose |
-|---|---|---|
-| `<field_name>` | `<Many2one / Char / Selection / ...>` | <what it stores or computes> |
-
-**Computed fields:**
-- `<field>` — computed by [`<method>()`](<path/file.py#Lnn>) — <what it calculates and when>
-
-**Constraints:**
-- `<_check_something>` — <what it enforces>
-
----
-
-## Key Methods
-
-| Method | File:Line | Purpose |
-|---|---|---|
-| `<method_name>()` | [`<file.py:nn>`](<path/file.py#Lnn>) | <what it does in one sentence> |
-
-### <method_name>() — detailed
-> [`<file.py:nn–mm>`](<path/file.py#Lnn>)
-
-<Explain the logic: inputs, what it changes, side effects, what it calls next.>
-
----
-
-## UI Entry Points
-
-| Entry Point | Path in UI | What It Does |
-|---|---|---|
-| <Menu item> | <Top Menu → Sub Menu → Page> | <what the user does here> |
-| <Button / Action> | <Form view / List view> | <what it triggers> |
-| <Wizard> | <where it appears> | <what it collects / does> |
-
----
-
-## Configuration
-
-| Setting | Location | Effect |
-|---|---|---|
-| `<setting_name>` | Settings → <section> | <what changes when enabled> |
-| `<security group>` | — | <what access it grants> |
-
----
-
-## Edge Cases & Gotchas
-
-- **<Topic>:** <Non-obvious behavior. Be specific. Include file reference if relevant.>
-- **<Topic>:** <Constraint or limit that surprises people.>
-- **<Topic>:** <Integration behavior that's easy to miss.>
+- **<Topic>:** <Something that surprises people or causes confusion. Be specific.>
+- **<Topic>:** <Constraint or limit that's easy to miss.>
 
 ---
 
 ## Related Docs
 
 - [`INDEX.md`](INDEX.md)
-- [`<other-module>.md`](<other-module>.md) — <why it's related>
+- [`<other-module>.md`](<other-module>.md) — <why related>
 ```
 
 ---
 
-## Writing Rules (enforced)
+## Writing Rules
 
-1. **No fact without a source.** If you cannot link to a file you actually read, do not write the sentence.
+1. **No fact without a source.** Link to a file you actually read.
 2. **No vague language.** Not "handles various cases" — say what cases.
-3. **Code links are mandatory** for: models, methods, fields, views, wizards.
-4. **Business flow diagram is mandatory** for any stateful process.
-5. **Dependencies table is mandatory** — always identify what is needed and what is produced.
-6. **Short sentences.** One idea per sentence. No padding.
-7. **Tables over prose** for structured data (fields, states, settings).
+3. **Flow over fields.** Explain how things connect, not what every column stores.
+4. **Methods only when essential.** Mention a method only if understanding it helps the reader grasp the flow.
+5. **Fields only when they matter.** Selection fields that change flow, computed fields with surprising behavior, config fields that unlock features. Skip the rest.
+6. **Business language first.** Explain in terms of what the user sees and does, then connect to code.
+7. **Short sentences.** One idea per sentence. No padding.
 8. **Update INDEX.md** when you create or update a module doc.
-9. **Every feature needs a use case.** Don't just describe what a feature does technically — show when and why a real user would use it.
-10. **Use cases must be concrete.** Name roles ("warehouse manager"), company types ("e-commerce company"), and specific situations ("end-of-month inventory count") — not abstract descriptions.
-11. **How-to scenarios are task-oriented.** Start with the user's goal, give exact steps (menu paths, button names, field values), explain what happens behind the scenes.
-12. **Connect business to technical.** In use cases and how-tos, link back to the relevant method/model when explaining "why this works" — this bridges the two audiences.
+9. **Scenarios must be concrete.** Name roles, company types, specific situations.
+10. **All source links use `../` prefix** — mandatory for correct resolution from `documentations/`.
 
-## Research Rules (enforced — must run before writing)
+## Research Rules
 
 ### Rule R1 — Link paths
-All links in `documentations/*.md` MUST use `../` prefix for source paths.
+All links in `documentations/*.md` MUST use `../` prefix.
 - Correct: `[stock_quant.py:42](../addons/stock/models/stock_quant.py#L42)`
 - Wrong: `[stock_quant.py:42](addons/stock/models/stock_quant.py#L42)`
 
-### Rule R2 — Always check settings (mandatory)
-Before documenting any configuration option or behavior gated by a setting:
-1. Read `addons/<module>/models/res_config_settings.py` (or the module that extends it).
-2. Find the exact field name, type, and `implied_group` / `config_parameter` it sets.
-3. Document: field technical name, UI label (`string=`), implied group or config key, and what behavior it enables.
+### Rule R2 — Check settings before documenting config
+Read `res_config_settings.py` before documenting any setting. Know what it actually does.
 
-Skipping this step leads to wrong or missing configuration docs. It is the #1 source of errors.
-
-### Rule R3 — Document both technical name and UI label
-For every field documented, include both:
-- Technical name: `delivery_steps` (Python field name)
-- UI label: "Outgoing Shipments" (`string=` value from field definition or view `string=` override)
-
-Find the UI label from the Python field `string=` argument. Only read the specific view XML if the label differs or visibility is unclear.
-
-### Rule R4 — Document visibility conditions for settings
-When a setting or field is controlled by a security group or another setting:
-1. Note the `groups=` condition.
-2. State in the docs: "Only visible when [Setting Name] is enabled" — with the implied group name.
-3. Read ONLY the specific view element containing the field, not the entire view file.
-
-### Rule R5 — Selection fields with 2+ values need examples
-For any `Selection` field that controls a business process (e.g., `delivery_steps`, `reception_steps`, `invoice_policy`):
-- Each value gets its own subsection.
-- Each subsection must include: "When to use", "What Odoo creates", step-by-step flow.
-- Get exact operation type names and sequence codes from `_get_picking_type_create_values()` or equivalent — not from assumptions.
-
-### Rule R6 — Use cases must reflect real module capabilities
-When writing use cases and how-to scenarios:
-1. Base them on actual features found in the source code — not on assumptions about what the module "should" do.
-2. Include exact UI paths (menu → submenu → button) verified from view XML or menu records.
-3. Each major feature of the module must appear in at least one use case or how-to.
-4. Connect each use case back to the technical implementation: "This works because `method_name()` does X" with a code link.
-
-### Rule R7 — Business context before technical depth
-Structure each documentation file so a reader can understand the business value without reading the technical sections:
-1. "What It Does", "When to Use", "Real-World Use Cases", and "How-To Scenarios" must be self-sufficient — no forward references to Key Models or Key Methods required to understand them.
-2. Technical sections (Key Models, Key Methods) come after and provide the "proof" and implementation details.
-3. How-to scenarios bridge the two: steps are business-language, "Why this works" connects to technical.
+### Rule R3 — Understand before writing
+Read the actual source code. Trace the flow. Don't guess based on field names or class names.

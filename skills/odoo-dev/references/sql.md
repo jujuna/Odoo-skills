@@ -12,6 +12,7 @@
 8. [Migrations and Data Scripts](#8-migrations-and-data-scripts)
 9. [Database Maintenance](#9-database-maintenance)
 10. [Antipatterns](#10-antipatterns)
+11. [Commit and Cache Safety](#11-commit-and-cache-safety)
 
 ---
 
@@ -32,6 +33,7 @@
 1. A comment explaining WHY the ORM cannot do the job
 2. Parameterized queries (`%s` — NEVER string interpolation)
 3. A docstring documenting the query purpose
+4. Flush/invalidate/`modified()` discipline if SQL interacts with ORM-cached data
 
 ---
 
@@ -126,6 +128,8 @@ def _bulk_archive_old_records(self, cutoff_date):
     triggering compute fields, tracking, and mail notifications
     that ORM write() would fire.
     """
+    Model = self.env['my.model']
+    Model.flush_model(['active', 'state', 'date'])
     self.env.cr.execute("""
         UPDATE my_model
         SET active = FALSE,
@@ -134,10 +138,12 @@ def _bulk_archive_old_records(self, cutoff_date):
         WHERE date < %s
             AND active = TRUE
             AND state = 'done'
+        RETURNING id
     """, (self.env.uid, cutoff_date))
-    # Invalidate ORM cache after raw UPDATE
-    self.env.invalidate_all()
-    _logger.info("Archived %d records before %s", self.env.cr.rowcount, cutoff_date)
+    records = Model.browse([row[0] for row in self.env.cr.fetchall()])
+    records.invalidate_recordset(['active', 'write_date', 'write_uid'], flush=False)
+    records.modified(['active'])
+    _logger.info("Archived %d records before %s", len(records), cutoff_date)
 ```
 
 ### Aggregation with window functions:
@@ -574,9 +580,20 @@ cr.execute("SELECT * FROM t WHERE id = %s", (record_id,))
 
 ### Don't forget to invalidate cache after raw SQL:
 ```python
-# After any UPDATE/DELETE via raw SQL:
-cr.execute("UPDATE my_model SET state = 'done' WHERE id IN %s", (tuple(ids),))
-self.env.invalidate_all()  # MANDATORY — otherwise ORM cache is stale
+# After UPDATE/DELETE via raw SQL, invalidate the changed records/fields:
+Model = self.env['my.model']
+if not ids:
+    return Model.browse()
+Model.flush_model(['state'])
+cr.execute("""
+    UPDATE my_model
+       SET state = %s
+     WHERE id IN %s
+ RETURNING id
+""", ('done', tuple(ids)))
+records = Model.browse([row[0] for row in cr.fetchall()])
+records.invalidate_recordset(['state'], flush=False)
+records.modified(['state'])
 ```
 
 ### Don't use SELECT * in production code:
@@ -605,3 +622,77 @@ cr.execute("INSERT INTO res_partner (name) VALUES (%s)", ("John",))
 # CORRECT — ORM handles security, tracking, computed fields
 self.env['res.partner'].create({'name': "John"})
 ```
+
+---
+
+## 11. Commit and Cache Safety
+
+For full transaction rules, load `references/transactions.md`.
+
+### Default: do not commit manually
+
+Odoo commits successful requests/jobs at the framework boundary and rolls back
+when an exception escapes. Manual `cr.commit()` makes previous changes durable
+even if later code fails.
+
+```python
+# BAD in buttons, CRUD overrides, computes, constraints, onchanges
+self.write({'state': 'done'})
+self.env.cr.commit()
+raise UserError(_("Later validation failed."))  # state is already committed
+```
+
+### When manual commit is acceptable
+
+Use manual commit only for resumable workers: cron, queue jobs, imports,
+migrations, or carefully documented external sync flows.
+
+```python
+def _cron_backfill(self, limit=1000):
+    """Backfill records in durable chunks."""
+    records = self.search([('needs_backfill', '=', True)], limit=limit, order='id')
+    if not records:
+        return
+    with self.env.cr.savepoint():
+        records._backfill_chunk()
+    if self._can_commit():
+        self.env.cr.commit()
+        self.env.invalidate_all()
+```
+
+### SQL read after ORM write
+
+```python
+records.write({'state': 'ready'})
+records.flush_recordset(['state'])
+self.env.cr.execute(
+    "SELECT COUNT(*) FROM my_model WHERE state = %s",
+    ('ready',),
+)
+```
+
+### SQL write before ORM read
+
+```python
+Model = self.env['my.model']
+if not ids:
+    return Model.browse()
+Model.flush_model(['state'])
+self.env.cr.execute("""
+    UPDATE my_model
+       SET state = %s
+     WHERE id IN %s
+ RETURNING id
+""", ('done', tuple(ids)))
+records = Model.browse([row[0] for row in self.env.cr.fetchall()])
+records.invalidate_recordset(['state'], flush=False)
+records.modified(['state'])
+```
+
+**Rules:**
+- Flush before SQL reads or SQL predicates that depend on pending ORM writes.
+- Invalidate after SQL writes before ORM reads changed fields.
+- Call `modified()` after SQL updates fields used by stored computes.
+- Prefer targeted `flush_model`, `flush_recordset`, `invalidate_recordset`.
+- Use `env.invalidate_all()` after manual `commit()`/`rollback()` or broad SQL changes.
+- Never commit to hide errors. Commit only to create a deliberate resumable boundary.

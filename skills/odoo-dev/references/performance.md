@@ -17,6 +17,15 @@
 13. [_order Performance](#13-_order-performance)
 14. [Flush and Invalidate](#14-flush-and-invalidate)
 15. [ORM vs Raw SQL Decision Matrix](#15-orm-vs-raw-sql-decision-matrix)
+16. [Performance Review Workflow](#16-performance-review-workflow)
+17. [Compute Field Batch Patterns](#17-compute-field-batch-patterns)
+18. [Prefetch and Fetch Strategy](#18-prefetch-and-fetch-strategy)
+19. [Domains and Query Shape](#19-domains-and-query-shape)
+20. [Cron and Import Throughput](#20-cron-and-import-throughput)
+21. [High-Risk Antipatterns](#21-high-risk-antipatterns)
+22. [Performance Budgets](#22-performance-budgets)
+23. [List View and Dashboard Performance](#23-list-view-and-dashboard-performance)
+24. [Transaction Cost and Lock Time](#24-transaction-cost-and-lock-time)
 
 ---
 
@@ -56,6 +65,9 @@ def action_send_emails(self):
 
 ## 2. Batch Operations
 
+Batching is the first Odoo performance rule. A correct Odoo method should work
+for 0, 1, or many records unless it explicitly enforces singleton behavior.
+
 ### create() — Always use multi-create:
 ```python
 # BAD — N create calls
@@ -64,6 +76,18 @@ for vals in vals_list:
 
 # GOOD — Single multi-create
 self.env['my.model'].create(vals_list)
+```
+
+### create() override — preserve multi-create:
+```python
+@api.model_create_multi
+def create(self, vals_list):
+    """Create records without breaking batch creation."""
+    for vals in vals_list:
+        vals.setdefault('state', 'draft')
+    records = super().create(vals_list)
+    records._post_create_batch_hook()
+    return records
 ```
 
 ### write() — Batch when possible:
@@ -76,9 +100,8 @@ for record in records:
 records.write({'state': 'done'})
 
 # GOOD — When values differ, group by value
-from itertools import groupby
-for state, group_records in groupby(records, key=lambda r: r.computed_state):
-    self.env['my.model'].browse([r.id for r in group_records]).write({'state': state})
+for state, group_records in records.grouped('computed_state').items():
+    group_records.write({'state': state})
 ```
 
 ### unlink() — Batch:
@@ -130,6 +153,18 @@ def _process_orders(self):
         self._process_single_order(order)
 ```
 
+### Existing recordset: use fetch()
+```python
+def _export_records(self, records):
+    """Export known records with predictable cache loading."""
+    records.fetch(['name', 'partner_id', 'amount_total'])
+    records.partner_id.fetch(['name', 'vat'])
+    return [record._export_row() for record in records]
+```
+
+`fetch()` is for an existing recordset. `search_fetch()` is for search + known
+field load in one step.
+
 ---
 
 ## 4. Search Optimization
@@ -143,6 +178,12 @@ data = records.read(['name', 'state', 'amount'])
 # NEW — Combined search + fetch in one query
 records = self.search_fetch(domain, ['name', 'state', 'amount'], limit=100)
 ```
+
+**Rules:**
+- Pass the smallest field list you need.
+- Avoid fetching binary/html/blob fields unless required.
+- Use `limit` when the UI or business rule only needs a bounded result.
+- Use deterministic `order`, usually ending with `id`.
 
 ### search_count with limit:
 ```python
@@ -165,15 +206,26 @@ if self.search_count([('partner_id', '=', partner.id)], limit=1):
     ...
 ```
 
-### Use domain optimization:
+### Shape domains around indexed/selective filters:
 ```python
-# Put indexed / most-selective fields first in domains
 domain = [
-    ('company_id', '=', self.env.company.id),  # indexed, very selective
-    ('state', '=', 'confirmed'),                # indexed selection
-    ('date', '>=', start_date),                 # indexed date range
-    ('name', 'ilike', search_term),             # unindexed text search — last
+    ('company_id', '=', self.env.company.id),  # company-scoped and indexed
+    ('state', '=', 'confirmed'),               # common indexed selection
+    ('date', '>=', start_date),                # range filter
+    ('name', 'ilike', search_term),            # expensive text search
 ]
+```
+
+Prefer `Domain` composition for dynamic conditions:
+```python
+from odoo.fields import Domain
+
+domain = Domain('company_id', 'in', self.env.companies.ids)
+if partner:
+    domain &= Domain('partner_id', '=', partner.id)
+if states:
+    domain &= Domain('state', 'in', states)
+records = self.search_fetch(domain, ['partner_id', 'state'], order='id')
 ```
 
 ---
@@ -205,7 +257,7 @@ current_age = fields.Integer(compute='_compute_current_age')  # changes daily
 def _compute_amount_total(self):
     """Compute total amount from order lines.
 
-    Optimized: uses read_group for batch aggregation instead of
+    Optimized: uses _read_group for batch aggregation instead of
     iterating lines per record.
     """
     if not self.ids:
@@ -222,6 +274,27 @@ def _compute_amount_total(self):
     for record in self:
         record.amount_total = totals_map.get(record.id, 0.0)
 ```
+
+### Compute count without N searches:
+```python
+@api.depends('invoice_ids')
+def _compute_invoice_count(self):
+    counts = self.env['account.move']._read_group(
+        [('partner_id', 'in', self.ids)],
+        groupby=['partner_id'],
+        aggregates=['__count'],
+    )
+    count_by_partner = {partner.id: count for partner, count in counts}
+    for partner in self:
+        partner.invoice_count = count_by_partner.get(partner.id, 0)
+```
+
+**Compute performance rules:**
+- Assign every record, even when there is no aggregate result.
+- Avoid `search_count()` inside the compute loop.
+- Avoid `mapped()` over huge One2many fields if `_read_group()` can aggregate.
+- Keep dependencies precise; broad dependencies cause recompute storms.
+- Store only when the field is searched/grouped/listed often or expensive and stable.
 
 ---
 
@@ -268,9 +341,16 @@ class MyModel(models.Model):
     _company_date_idx = models.Index("(company_id, date)")
 ```
 
+### Index kind (`index=` accepts more than a bool):
+- `True` / `'btree'` — standard BTREE; the default choice for Many2one and equality/range filters.
+- `'btree_not_null'` — BTREE that excludes NULLs; smaller and faster when the column is mostly NULL or NULL is never searched.
+- `'trigram'` — GIN trigram index; the right tool for `ilike` / substring search on text columns (a plain BTREE does not help `ilike '%x%'`).
+- `False` / `None` — no index (default). No effect on non-stored/virtual fields.
+
 ### Index guidelines:
 - Always index: `Many2one` fields, `state`/`status` fields, date fields used in search
 - Index `company_id` — always used in record rules
+- Use `'trigram'` for columns hit by leading-wildcard `ilike`; use `'btree_not_null'` for sparse optional columns
 - Add composite indexes for common search combinations
 - Don't over-index: each index slows down writes
 
@@ -280,7 +360,7 @@ class MyModel(models.Model):
 
 ### Efficient recordset manipulation:
 ```python
-# Filtering — use filtered_domain for SQL-backed filtering
+# Filtering an existing recordset with domain semantics
 confirmed = self.filtered_domain([('state', '=', 'confirmed')])
 
 # Mapping — collect related field values
@@ -304,6 +384,10 @@ filtered = all_records.filtered(lambda r: r.amount > 1000 and r.state == 'confir
 filtered = self.search([('amount', '>', 1000), ('state', '=', 'confirmed')])
 ```
 
+`filtered_domain()` evaluates a domain on an existing recordset and keeps the
+same order. It is clean for already-loaded small/medium sets, but it is not a
+replacement for `search()` on large tables.
+
 ---
 
 ## 9. Memory Management
@@ -313,22 +397,24 @@ filtered = self.search([('amount', '>', 1000), ('state', '=', 'confirmed')])
 def _cron_process_large_batch(self):
     """Process records in chunks to control memory usage."""
     batch_size = 200
-    offset = 0
     while True:
         records = self.search(
             [('state', '=', 'pending')],
             limit=batch_size,
-            offset=offset,
             order='id',
         )
         if not records:
             break
-        records._process_batch()
+        with self.env.cr.savepoint():
+            records._process_batch()
         # Commit and clear cache after each batch
-        self.env.cr.commit()
-        self.env.invalidate_all()
-        offset += batch_size
+        if self._can_commit():
+            self.env.cr.commit()
+            self.env.invalidate_all()
 ```
+
+Avoid `offset` for mutating batch jobs: once processed records leave the domain,
+offset can skip rows. Repeatedly search the first batch ordered by `id`.
 
 ### Avoid loading large binary fields:
 ```python
@@ -343,6 +429,12 @@ records = self.search_fetch(domain, ['name', 'state'])  # no binary
 for r in records:
     if r.has_attachment:  # boolean check first
         data = r.attachment_data  # load binary only when needed
+```
+
+`Binary` fields default to `attachment=True` (stored in `ir.attachment`, not a table column) and are never prefetched. When you only need the size — list views, "has file?" checks — read with `bin_size=True` in context so the field yields the human-readable size instead of the blob:
+
+```python
+size_str = record.with_context(bin_size=True).document  # e.g. "2.10 Mb", not the bytes
 ```
 
 ---
@@ -405,6 +497,7 @@ class MyModel(models.Model):
 - Prefer normal relational fields (default access checks) in business code
 - Treat `bypass_search_access=True` as security-sensitive and justify it with a comment
 - Optimize search performance with proper domains and indexes, not access-bypass flags
+- `auto_join` was removed in v19. To filter on related records efficiently, use the `any` / `not any` domain operators (see `orm.md` section 4) rather than the old join flag.
 
 ---
 
@@ -424,7 +517,7 @@ def _process_in_chunks(self, records):
     chunk_size = 200
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
-        # with_prefetch() creates a new prefetch group limited to this chunk
+        # with_prefetch() creates a prefetch group limited to this chunk
         # so only 200 records are loaded into memory at a time
         for record in chunk.with_prefetch():
             record._do_expensive_work()
@@ -433,6 +526,7 @@ def _process_in_chunks(self, records):
 **When to use:**
 - Processing very large recordsets (10k+) where you don't need all data in memory
 - When combined with `cr.commit()` in batch processing
+- Rebuilding a prefetch set after indexing into recordsets or browsing IDs
 
 ---
 
@@ -489,7 +583,7 @@ records.invalidate_recordset(['field_a'])  # invalidate specific fields
 **Rules:**
 - `flush_all()` before any raw SQL SELECT that reads data you changed via ORM
 - `invalidate_all()` after any raw SQL UPDATE/DELETE that changes data ORM might have cached
-- After `cr.commit()` always call `invalidate_all()` — the cache may reference rolled-back data
+- After `cr.commit()` always call `invalidate_all()` — the cache may reference stale data
 - Prefer `flush_recordset`/`invalidate_recordset` over `_all` variants for better performance
 
 ---
@@ -507,9 +601,219 @@ records.invalidate_recordset(['field_a'])  # invalidate specific fields
 | LATERAL JOIN, CTE, recursive queries | No | Yes |
 | EXISTS subquery for performance | No | Yes |
 | INSERT ... ON CONFLICT (upsert) | No | Yes |
-| SELECT FOR UPDATE (row locking) | No | Yes |
+| Row locking (FOR UPDATE) | Yes (`lock_for_update()` / `try_lock_for_update()`) | Raw only for exotic lock modes |
 | Dashboard KPI (single fast query) | Depends | Often yes |
 | COPY command for bulk data import | No | Yes |
 
 **Always remember:** Raw SQL bypasses security (ACLs, record rules), tracking,
 computed fields, and constraints. Every raw SQL usage needs explicit justification.
+
+---
+
+## 16. Performance Review Workflow
+
+Use this workflow before optimizing code:
+
+1. Identify the hot path: button, compute, list view, cron, import, controller, report.
+2. Estimate volume: records per request, child records per parent, companies, users.
+3. Count queries: query count should be O(1), O(models), or O(batches), never O(records).
+4. Check data loaded: avoid loading unused fields, binary fields, and huge One2many chains.
+5. Move filtering/aggregation to SQL via domains, `search_fetch()`, `fetch()`, `_read_group()`, or justified SQL.
+6. Add an index only for a real repeated query shape.
+7. Re-check security and multi-company behavior after optimizing.
+
+---
+
+## 17. Compute Field Batch Patterns
+
+### Parent totals from children
+```python
+@api.depends('line_ids.amount')
+def _compute_amount_total(self):
+    grouped = self.env['my.line']._read_group(
+        [('parent_id', 'in', self.ids)],
+        ['parent_id'],
+        ['amount:sum'],
+    )
+    amount_by_parent = {parent.id: amount for parent, amount in grouped}
+    for record in self:
+        record.amount_total = amount_by_parent.get(record.id, 0.0)
+```
+
+### Boolean existence
+```python
+@api.depends('line_ids.state')
+def _compute_has_late_lines(self):
+    grouped = self.env['my.line']._read_group(
+        [('parent_id', 'in', self.ids), ('state', '=', 'late')],
+        ['parent_id'],
+        ['__count'],
+    )
+    late_parent_ids = {parent.id for parent, count in grouped if count}
+    for record in self:
+        record.has_late_lines = record.id in late_parent_ids
+```
+
+### Related display data
+```python
+@api.depends('partner_id')
+def _compute_partner_vat_label(self):
+    self.partner_id.fetch(['name', 'vat'])
+    for record in self:
+        partner = record.partner_id
+        record.partner_vat_label = partner and "%s - %s" % (partner.name, partner.vat or '') or False
+```
+
+---
+
+## 18. Prefetch and Fetch Strategy
+
+| Situation | Best tool |
+|---|---|
+| Search records and immediately read known fields | `search_fetch(domain, field_names)` |
+| Existing recordset, known fields | `records.fetch(field_names)` |
+| Need related records as recordset | `records.mapped('partner_id')` |
+| Need grouped recordsets by existing field | `records.grouped('field_name')` |
+| Need aggregate count/sum per parent | `_read_group()` |
+| Huge batch where cache grows too much | Chunk + `with_prefetch()` + invalidate after commit |
+
+**Do not:**
+- `browse(record_id)` inside loops when `browse(ids)` works.
+- Repeatedly call `mapped()` inside loops.
+- Use `prefetch_fields=False` globally unless you measured and understand the side effects.
+- Fetch all fields (`field_names=None`) in export/report code when a small list is enough.
+
+---
+
+## 19. Domains and Query Shape
+
+Good domains are selective, indexed, and company-aware.
+
+```python
+domain = (
+    Domain('company_id', 'in', self.env.companies.ids)
+    & Domain('state', '=', 'posted')
+    & Domain('date', '>=', date_from)
+    & Domain('date', '<=', date_to)
+)
+```
+
+**Rules:**
+- Include `company_id` when the business object is company-scoped.
+- Include `active_test=False` only when archived records are required.
+- Avoid leading wildcard `ilike` on large tables in hot paths.
+- Avoid sorting large tables by unindexed text/computed fields.
+- For repeated searches, index the combination that matches equality/range/order usage.
+- Use partial indexes for common boolean/state subsets on very large tables.
+
+---
+
+## 20. Cron and Import Throughput
+
+```python
+def _cron_process_pending(self, limit=500):
+    """Process pending records in resumable chunks."""
+    records = self.search_fetch(
+        [('state', '=', 'pending')],
+        ['state', 'company_id'],
+        limit=limit,
+        order='id',
+    )
+    for company, batch in records.grouped('company_id').items():
+        with self.env.cr.savepoint():
+            batch.with_company(company)._process_pending_batch()
+    if self._can_commit():
+        self.env.cr.commit()
+        self.env.invalidate_all()
+```
+
+**Rules:**
+- Make jobs resumable; each committed batch must leave clear state.
+- Use savepoints around recoverable batch units.
+- Commit only after durable state changes.
+- Never commit inside a compute/onchange/button request to hide errors.
+- Keep external calls idempotent or persist idempotency keys.
+- Load `transactions.md` before introducing manual commits.
+
+---
+
+## 21. High-Risk Antipatterns
+
+```python
+# N+1 count
+for partner in partners:
+    partner.invoice_count = Move.search_count([('partner_id', '=', partner.id)])
+
+# Broken mutating pagination
+offset = 0
+while True:
+    batch = Model.search(domain, offset=offset, limit=100)
+    batch.write({'state': 'done'})
+    offset += 100
+
+# Cache/security bypass without discipline
+self.env.cr.execute(f"UPDATE my_model SET state = '{state}' WHERE id IN {tuple(self.ids)}")
+```
+
+Replace with `_read_group()`, repeated first-page batches, and parameterized SQL
+with flush/invalidate only when SQL is justified.
+
+---
+
+## 22. Performance Budgets
+
+Use rough budgets to decide how hard to optimize:
+
+| Path | Target |
+|---|---|
+| Button on 1 record | O(1) queries plus bounded related reads |
+| Button on N selected records | O(models) or O(groups), not O(records) |
+| Stored compute for list view | One aggregate query per child model |
+| Cron/import chunk | Bounded memory, bounded locks, resumable state |
+| Dashboard/KPI | One or a few aggregate queries, cached if expensive |
+| Portal/controller list | Domain + indexed order + limit/pager |
+
+**Review rule:** if query count grows linearly with selected records, child
+records, companies, or users, stop and redesign the data access.
+
+---
+
+## 23. List View and Dashboard Performance
+
+List views expose compute and related-field mistakes quickly.
+
+**Rules:**
+- Store expensive fields displayed in list/kanban/search/groupby.
+- Avoid non-stored computes that read One2many lines per row.
+- Use smart button counts computed by `_read_group()`, not per-record `search_count()`.
+- Keep default `_order` indexed and deterministic.
+- Avoid default filters that force unindexed `ilike` on large tables.
+- For dashboard cards, prefer a dedicated aggregate method using `_read_group()` or justified SQL.
+- Cache expensive dashboard results only when invalidation is well-defined.
+
+```python
+def _compute_move_count(self):
+    grouped = self.env['account.move']._read_group(
+        [('partner_id', 'in', self.ids), ('state', '=', 'posted')],
+        ['partner_id'],
+        ['__count'],
+    )
+    count_by_partner = {partner.id: count for partner, count in grouped}
+    for partner in self:
+        partner.posted_move_count = count_by_partner.get(partner.id, 0)
+```
+
+---
+
+## 24. Transaction Cost and Lock Time
+
+Performance is not only query speed. Long transactions hold locks, keep dead
+tuples alive, delay vacuum, and increase serialization conflicts.
+
+**Rules:**
+- In requests/buttons, keep one atomic transaction and make it fast.
+- In cron/import jobs, process chunks small enough to avoid long locks.
+- Commit only at resumable boundaries, then invalidate the environment.
+- For worker queues and read-then-write atomicity, lock rows with `try_lock_for_update(limit=...)` / `lock_for_update()` (ORM, `SKIP LOCKED`) instead of raw `FOR UPDATE`. See `transactions.md` section 10.
+- Do external API calls outside broad database locks when possible.
+- Never sleep inside a transaction unless the flow is explicitly designed for it.

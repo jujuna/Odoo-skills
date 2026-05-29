@@ -31,6 +31,11 @@ Whenever Odoo business logic comes up in a session:
 2. If missing or incomplete — research from source, document it, update `documentations/INDEX.md`
 3. Follow `.claude/skills/odoo-dev/references/doc-template.md` format
 4. All links in docs use `../` prefix: `](../addons/...)`
-5. Always read `res_config_settings.py` before documenting config options
-6. Document both Python field name and `string=` UI label
-7. Document `groups=` visibility conditions
+
+### Documentation philosophy
+- **Goal:** Understand the flow, purpose, and real usage — not catalog every field
+- **Write for someone who wants to learn the module**, not someone grepping for field names
+- Explain *how things connect* and *why they exist*, not just *what they are*
+- Mention key methods only when they're essential to understanding the flow
+- Skip exhaustive field/model tables — only mention fields that are decision points or non-obvious
+- Configuration: document what it changes in behavior, not just the field metadata
