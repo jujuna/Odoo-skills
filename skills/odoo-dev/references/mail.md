@@ -1,4 +1,4 @@
-# Mail & Tracking — Odoo 19+
+# Mail & Tracking — Odoo 20
 
 ## Table of Contents
 

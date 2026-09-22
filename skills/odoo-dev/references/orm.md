@@ -1,4 +1,4 @@
-# ORM Excellence — Odoo 19+
+# ORM Excellence — Odoo 20
 
 Use this reference for any non-trivial Odoo Python code. The default standard is:
 **batch-safe, access-safe, company-safe, cache-correct, and easy to review.**
@@ -119,7 +119,7 @@ def _unlink_except_done(self):
 
 ## 4. Domains
 
-Use the Odoo 19 `Domain` API for dynamic composition. It is safer and more readable than hand-building prefix-list operators.
+Use the `Domain` API for dynamic composition. It is safer and more readable than hand-building prefix-list operators.
 
 ```python
 from odoo.fields import Domain
@@ -134,7 +134,7 @@ moves = self.env['account.move'].search_fetch(domain, ['partner_id', 'amount_tot
 
 ### Relational sub-conditions: `any` / `not any`
 
-Filter a record by a condition on its related records. This is the v19 replacement for nested subqueries and the removed `auto_join`:
+Filter a record by a condition on its related records. This replaces nested subqueries and the removed `auto_join`:
 
 ```python
 # orders having at least one late line
@@ -215,7 +215,24 @@ for order in self:
 - In compute methods, assign every record every time.
 - For known field reads after a search, prefer `search_fetch(domain, fields)`.
 - For existing recordsets, use `records.fetch(fields)` before heavy loops.
-- Need webclient-formatted groups (labels, ranges) rather than raw tuples? Use `formatted_read_group(...)` (same args, returns a list of dicts).
+- Need webclient-formatted groups (labels, ranges) rather than raw tuples? Use `formatted_read_group(...)` (same args, returns a list of dicts) — it lives in the web layer, not on `BaseModel`.
+- Several groupings in one round-trip: `_read_grouping_sets(domain, grouping_sets, aggregates, order)`.
+
+### Which of the three in v20
+
+| Method | Layer | Relational values | Use for |
+|---|---|---|---|
+| `read_group(...)` | public, `@api.model`, `@typing.final` | ids | RPC / external callers |
+| `_read_group(...)` | backend | recordsets | all server Python |
+| `formatted_read_group(...)` | `addons/web` | formatted dicts | the web client |
+
+`read_group()` is **not** deprecated in v20 — it was restored as the public wrapper with the
+modern signature `(domain, groupby, aggregates, having, offset, limit, order)`. The old v16
+form (`fields=`, `lazy=True`, returning dicts) no longer exists.
+
+When overriding the group-by hooks, note the v20 signatures take a `TableSQL` first:
+`_read_group_select(table, spec)`, `_read_group_groupby(table, spec)`,
+`_read_group_having(table, domain)`, `_read_group_orderby(table, order, terms)`.
 
 ---
 
@@ -311,11 +328,19 @@ journals = self.env['account.journal'].search(
 ```
 
 **Rules:**
-- Company-dependent models should have `company_id` indexed.
-- Business-critical Many2one fields should use `check_company=True`.
-- For cross-company processing, group by company and use `with_company(company)`.
-- Do not write records from multiple companies in one batch if defaults, sequences, journals, taxes, or accounts depend on company.
+- `company_id` is indexed and defaults to `self.env.company`.
+- Every company-scoped Many2one uses `check_company=True`, and the model sets
+  `_check_company_auto = True`.
+- Cross-company processing groups by company: `for company, recs in self.grouped('company_id').items(): recs.with_company(company)...`
+- Do not write records of several companies in one batch when defaults, sequences,
+  journals, taxes or accounts depend on the company.
+- `self.env.company` for the active company, `self.env.companies` for the visible set.
+  Never `self.env.user.company_id` in business logic.
 - Be explicit with `active_test=False` when archived records matter.
+
+Company scoping in the database is enforced by a **restriction row** in
+`security/ir.access.csv` (empty `group_id`), not by `ir.rule` — that model no longer exists.
+Full rules, branch companies and the `parent_of` helpers: `multicompany.md`.
 
 ---
 
@@ -330,7 +355,7 @@ _external_ref_unique = models.Constraint(
 )
 ```
 
-For read-then-write atomicity, take an explicit row lock (v19 ORM API) instead of hand-writing `SELECT ... FOR UPDATE`:
+For read-then-write atomicity, take an explicit row lock instead of hand-writing `SELECT ... FOR UPDATE`:
 
 ```python
 batch = self.search([('state', '=', 'pending')], limit=100, order='id')
@@ -342,7 +367,7 @@ locked.write({'state': 'processing'})
 - Use `models.Constraint(...)` for uniqueness and hard invariants.
 - Use Python `@api.constrains` when the invariant needs ORM logic.
 - For scarce resources (sequence gaps, one worker per row, inventory reservations), use `lock_for_update()` (must lock all, raises `LockError`) or `try_lock_for_update(limit=...)` (locks what it can, returns the subset). See `transactions.md` section 10.
-- Detect hierarchy loops with `_has_cycle(field_name=None)` (returns `True` when a loop exists) — not the deprecated `_check_recursion()`.
+- Detect hierarchy loops with `_has_cycle(field_name=None)` (returns `True` when a loop exists). `_check_recursion()` and `_check_m2m_recursion()` were **removed in v20**, and the boolean is inverted.
 - Avoid check-then-create races; prefer SQL constraints or atomic upsert when the ORM cannot express it.
 
 ---

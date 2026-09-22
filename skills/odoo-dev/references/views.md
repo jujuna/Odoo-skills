@@ -1,4 +1,4 @@
-# XML Views & Inheritance — Odoo 19+
+# XML Views & Inheritance — Odoo 20
 
 ## Table of Contents
 
@@ -22,13 +22,14 @@
 | Type | Tag | Purpose |
 |------|-----|---------|
 | Form | `<form>` | Single record editing |
-| List | `<list>` | Multi-record table (v19: `<list>` not `<tree>`) |
+| List | `<list>` | Multi-record table — `<list>`, never `<tree>` |
 | Search | `<search>` | Filters, group-by, search fields |
 | Kanban | `<kanban>` | Card-based view |
 | Calendar | `<calendar>` | Date-based view |
 | Pivot | `<pivot>` | Pivot table analysis |
 | Graph | `<graph>` | Charts |
 | Activity | `<activity>` | Activity-centric view |
+| Card | `<card>` | **v20** — card layout, new `ir.ui.view` type |
 
 ---
 
@@ -452,7 +453,7 @@ Calendar attributes:
 
 ## 8. Expressions
 
-Odoo 19 uses **expression strings** directly on elements. The old `attrs` dictionary
+Views use **expression strings** directly on elements. The old `attrs` dictionary
 syntax is deprecated.
 
 ### Modern syntax (v17+):
@@ -518,7 +519,7 @@ syntax is deprecated.
             <t t-foreach="docs" t-as="doc">
                 <t t-call="web.external_layout">
                     <div class="page">
-                        <h2><t t-esc="doc.name"/></h2>
+                        <h2><t t-out="doc.name"/></h2>
 
                         <div class="row mb-4">
                             <div class="col-6">
@@ -543,9 +544,9 @@ syntax is deprecated.
                             <tbody>
                                 <t t-foreach="doc.line_ids" t-as="line">
                                     <tr>
-                                        <td><t t-esc="line.product_id.name"/></td>
+                                        <td><t t-out="line.product_id.name"/></td>
                                         <td class="text-end">
-                                            <t t-esc="line.quantity"/>
+                                            <t t-out="line.quantity"/>
                                         </td>
                                         <td class="text-end">
                                             <span t-field="line.price_unit"
@@ -568,13 +569,37 @@ syntax is deprecated.
 ```
 
 ### Report rules:
-- Use `t-esc` for values — never `t-out` with user data (XSS risk)
+- Use `t-out` for values. It escapes by default; only a `Markup` value passes through raw.
+  `t-esc` and `t-raw` are gone — core has 0 `t-esc` and 576 `t-out` in `addons/*/report/`.
 - Use `t-field` for formatted output (respects locale, widget options)
-- Use `t-options='{"widget": "monetary", ...}'` for currency formatting
+- Use `t-options='{"widget": "monetary", "display_currency": doc.currency_id}'` for money
 - Use `t-options='{"widget": "date"}'` for locale-aware dates
-- `web.external_layout` provides company header/footer
+- `web.external_layout` provides the company header/footer
 - `web.html_container` wraps everything for PDF generation
 - `report_type`: `qweb-pdf` for PDF, `qweb-html` for browser preview
+
+### v20: `t-call` takes parameters as attributes
+
+The `<t t-set>`-before-`<t t-call>` idiom is gone. Pass values on the `t-call` element:
+
+```xml
+<!-- v19 -->
+<t t-call="web.brand_promotion_message">
+    <t t-set="_utm_medium">portal</t>
+</t>
+
+<!-- v20 -->
+<t t-call="web.brand_promotion_message" _message.translate="" _utm_medium.f="portal"/>
+```
+
+| Form | Meaning |
+|---|---|
+| `name="expr"` | Python expression |
+| `name.f="text"` | format string / literal |
+| `name.translate="text"` | translatable literal |
+
+The called template's body is still available as `t-out="0"`. Real example:
+[addons/web/views/webclient_templates.xml:103](../../../../addons/web/views/webclient_templates.xml#L103).
 
 ---
 

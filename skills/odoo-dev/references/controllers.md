@@ -1,4 +1,4 @@
-# Controllers & API — Odoo 19+
+# Controllers & API — Odoo 20
 
 ## Table of Contents
 
@@ -40,7 +40,9 @@ In `__manifest__.py`, no `data` entry is needed — controllers are auto-discove
 | `type='jsonrpc'` | `application/json` | AJAX calls, OWL components, API | No (session auth) |
 | `type='http'` | `text/html` or form data | Web pages, form submissions, downloads | Yes (auto) |
 
-**v19 note:** `type='json'` is a **deprecated alias** for `type='jsonrpc'`. Always use `type='jsonrpc'` in new code.
+**Route types:** `type='jsonrpc'` (422 core usages) and `type='http'`. `type='json'` is a
+deprecated alias — never write it. In v20 `odoo.http` is a package: helpers moved, e.g.
+`odoo.http.dispatcher.serialize_exception`.
 
 ---
 
@@ -141,22 +143,37 @@ return request.make_response(
 
 ## 5. JSON-2 External API
 
-Odoo 19's primary external API. Endpoints follow `/json/2/<model>/<method>`.
+The external API. Endpoints follow `/json/2/<model>/<method>`.
 
-### Authentication:
+Served by the `rpc` module (auto-installed), which also provides `/xmlrpc` and `/jsonrpc` —
+[addons/rpc/controllers/json2.py:49](../../../../addons/rpc/controllers/json2.py#L49).
+
 ```bash
-# API key in header
 curl -X POST https://myodoo.com/json/2/res.partner/search_read \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{"params": {"domain": [["is_company", "=", true]], "fields": ["name", "email"], "limit": 10}}'
+  -d '{"domain": [["is_company", "=", true]], "fields": ["name", "email"], "limit": 10}'
 ```
 
-### Key points:
-- API key duration is group-driven (`res.groups.api_key_duration`), not global
-- All standard ORM methods are accessible: `search_read`, `create`, `write`, `unlink`, `call`
-- Security rules (ACLs + record rules) apply normally based on the API key's user
-- Use `search_read` instead of separate `search` + `read` for efficiency
+### The contract, exactly
+
+- `POST` only, `auth='bearer'` with `bearer_scope='rpc'` — the key comes from
+  `res.users.apikeys` with scope `rpc`
+- the body is a **flat JSON object of keyword arguments** — not wrapped in `{"params": ...}`
+  like JSON-RPC
+- two reserved keys: `ids` (the recordset to call the method on) and `context`
+- everything else is bound to the method signature; a mismatch returns 422
+- the response is the **raw result**, not a JSON-RPC envelope
+- a recordset result is returned as a list of ids
+- multi-database servers need an `X-odoo-database` header
+- only **public** methods are callable — resolved through `models.get_public_method()`, so
+  anything starting with `_` or decorated `@api.private` is a 404
+- calling an `@api.model` method with `ids` is a 422
+- `ir.access` permissions and restrictions apply as the API key's user, including the
+  company restriction
+
+### Key duration
+Group-driven via `res.groups.api_key_duration` (days), not a global setting.
 
 ### Creating API-friendly methods on models:
 ```python
@@ -397,7 +414,7 @@ class WebsiteSaleCustom(WebsiteSale):
 
 ### DO NOT use `type='json'` in new code:
 ```python
-# WRONG (deprecated alias in v19)
+# WRONG (deprecated alias)
 @http.route('/api/data', type='json', auth='user')
 
 # CORRECT

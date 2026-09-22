@@ -1,4 +1,4 @@
-# Data Files — Odoo 19+
+# Data Files — Odoo 20
 
 ## Table of Contents
 
@@ -128,7 +128,7 @@ eval="[(5, 0, 0)]"
     <!-- Records that must always match code — overwritten on update -->
     <record id="..." model="ir.ui.view">...</record>
     <record id="..." model="ir.actions.act_window">...</record>
-    <record id="..." model="ir.model.access">...</record>
+    <record id="..." model="ir.access">...</record>
     <record id="..." model="res.groups">...</record>
 </data>
 ```
@@ -138,7 +138,7 @@ eval="[(5, 0, 0)]"
 | Record type | noupdate? | Why |
 |---|---|---|
 | Views, actions, menus | No | Must stay in sync with code |
-| Security groups, ACLs | No | Must stay in sync with code |
+| Security groups, `ir.access` rows | No | Must stay in sync with code |
 | Cron jobs | Yes | Admin may change schedule |
 | Mail templates | Yes | Admin may customize text |
 | Sequences | Yes | Admin may change prefix/padding |
@@ -150,13 +150,21 @@ eval="[(5, 0, 0)]"
 
 ## 4. CSV Data Files
 
-### ir.model.access.csv (ACL)
+### ir.access.csv (v20 — replaces ir.model.access.csv **and** ir.rule)
 
 ```csv
-id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_my_model_user,my.model.user,model_my_model,my_module.group_user,1,1,1,0
-access_my_model_manager,my.model.manager,model_my_model,my_module.group_manager,1,1,1,1
+id,name,model_id,group_id/id,operation,domain
+access_my_model_user,my.model user,my.model,my_module.group_user,cru,
+access_my_model_manager,my.model manager,my.model,my_module.group_manager,crud,
+my_model_comp_rule,My Model multi-company,my.model,,crud,"[('company_id', 'in', company_ids)]"
 ```
+
+- `model_id` is the model **name**, not the `model_xxx` xml id
+- `group_id/id` empty means a **restriction** applied to everyone, not "grant to all"
+- `operation` is one Selection value (`r`, `cru`, `crud`, …), not four boolean columns
+- this file goes **last** in the manifest `data` list
+
+Full semantics: `security.md`.
 
 ### Bulk data CSV
 
@@ -358,32 +366,39 @@ Demo data is only loaded when the database is created with "Load demonstration d
 
 ## 10. Manifest Data Order
 
+v20 order — groups first, **access last**:
+
 ```python
 'data': [
-    # 1. Security — ALWAYS first
-    'security/groups.xml',
-    'security/ir.model.access.csv',
-    'security/rules.xml',
+    # 1. Groups and privileges — ALWAYS first
+    'security/my_module_security.xml',
 
     # 2. Core data
-    'data/sequence_data.xml',
-    'data/cron_data.xml',
+    'data/ir_sequence_data.xml',
+    'data/ir_cron_data.xml',
     'data/mail_template_data.xml',
 
     # 3. Reports and wizards
     'report/my_report_templates.xml',
     'wizards/my_wizard_views.xml',
 
-    # 4. Views, actions, menus — LAST
+    # 4. Views, actions, menus
     'views/my_model_views.xml',
-    'views/menu.xml',
+    'views/my_model_menus.xml',
+
+    # 5. Access rows — ALWAYS last
+    'security/ir.access.csv',
 ],
 ```
 
-**Why this order matters:**
-- Security groups must exist before views that reference them
-- Data records must exist before views that use them as defaults
-- Views/menus reference actions that reference models — all must exist first
+**Why:**
+- Views, menus and actions reference groups, so groups load first
+- `ir.access` rows carry domains that may reference records defined by the module, so they
+  load after everything else
+- Menus reference actions, so menu files come after the view files that define them
+
+Verified in `account`, `stock`, `project`, `hr`, `purchase`, `mail`, `sale`: the groups file
+is manifest entry 0 and `security/ir.access.csv` is the final entry.
 
 ---
 
@@ -454,17 +469,18 @@ Demo data is only loaded when the database is created with "Load demonstration d
 ### Wrong manifest load order
 
 ```python
-# BAD — views reference groups that don't exist yet
+# BAD — views reference groups that don't exist yet, and access loads too early
 'data': [
     'views/my_model_views.xml',
-    'security/groups.xml',        # too late!
+    'security/my_module_security.xml',   # too late
+    'security/ir.access.csv',
 ]
 
-# GOOD — security first
+# GOOD — groups first, access last
 'data': [
-    'security/groups.xml',
-    'security/ir.model.access.csv',
+    'security/my_module_security.xml',
     'views/my_model_views.xml',
+    'security/ir.access.csv',
 ]
 ```
 

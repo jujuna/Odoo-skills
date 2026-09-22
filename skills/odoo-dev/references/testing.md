@@ -1,4 +1,11 @@
-# Testing — Odoo 19+
+# Testing — Odoo 20
+
+**Tests are not automatic. Ask first.** Before writing any test, tell the user which
+behaviors you would cover and let them decide. Push for a yes when the change touches
+security, money, or a state machine; accept a no everywhere else. Never create a `tests/`
+folder on your own initiative.
+
+This file is what to do once the user says yes.
 
 ## Table of Contents
 
@@ -208,7 +215,7 @@ def setUpClass(cls):
     cls.sale_user = cls.env['res.users'].create({
         'name': 'Sale User',
         'login': 'sale_user_test',
-        'groups_id': [
+        'group_ids': [
             Command.set([
                 cls.env.ref('sales_team.group_sale_salesman').id,
                 cls.env.ref('base.group_user').id,
@@ -218,7 +225,7 @@ def setUpClass(cls):
     cls.sale_manager = cls.env['res.users'].create({
         'name': 'Sale Manager',
         'login': 'sale_manager_test',
-        'groups_id': [
+        'group_ids': [
             Command.set([
                 cls.env.ref('sales_team.group_sale_salesman_all_leads').id,
                 cls.env.ref('base.group_user').id,
@@ -246,17 +253,36 @@ def test_user_cannot_read_others_records(self):
         self.order.with_user(self.sale_user).read(['name'])
 ```
 
-### Testing check_access explicitly:
+### Testing access explicitly (v20 API):
 ```python
-def test_acl_permissions(self):
-    """Test ACL grants correct permissions."""
+def test_access_permissions(self):
     order = self.order.with_user(self.sale_user)
-    # check_access_rights returns None on success, raises AccessError on failure
-    order.check_access_rights('read')
-    order.check_access_rights('write')
+    order.check_access('read')            # raises AccessError on failure
+    order.check_access('write')
+    self.assertFalse(order.has_access('unlink'))
     with self.assertRaises(AccessError):
-        order.check_access_rights('unlink')
+        order.check_access('unlink')
+
+def test_access_subset(self):
+    orders = self.orders.with_user(self.sale_user)
+    self.assertEqual(orders._filtered_access('write'), self.own_orders)
 ```
+
+`check_access_rights()`, `check_access_rule()` and `_filter_access_rules()` were removed in
+v20 — use `check_access()`, `has_access()` and `_filtered_access()`. All three return
+"allowed" under `sudo()`, so always call them on a `with_user(...)` recordset.
+
+### Testing the multi-company restriction
+
+```python
+def test_other_company_is_invisible(self):
+    user = self.sale_user.with_company(self.company_b)
+    with self.assertRaises(AccessError):
+        self.order_company_a.with_user(user).check_access('read')
+```
+
+A model with a company restriction row deserves this test more than it deserves a happy-path
+compute test.
 
 ---
 

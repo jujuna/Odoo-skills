@@ -1,4 +1,4 @@
-# Scheduled Actions (Cron) — Odoo 19+
+# Scheduled Actions (Cron) — Odoo 20
 
 ## Table of Contents
 
@@ -138,7 +138,10 @@ if self._can_commit():
 
 ## 4. _commit_progress API
 
-Odoo 19 provides `_commit_progress` for long-running cron tasks. It handles commit timing and progress reporting.
+`_commit_progress` handles commit timing and progress reporting for long-running cron tasks.
+In v20 a job gets at least `MIN_TIME_PER_JOB = 120` seconds, each job runs in its own
+`contextvars` context, and a repeatedly failing job notifies the admin before being
+deactivated.
 
 ```python
 def _cron_send_emails(self):

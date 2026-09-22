@@ -1,723 +1,318 @@
-# OWL 2 & Frontend — Odoo 19+
+# OWL 3 & Frontend — Odoo 20
 
-## Table of Contents
+Odoo 20 ships **OWL 3** (`addons/web/static/lib/owl/owl.js` reports `3.0.0-alpha.49`).
+This is a new reactivity model — signals and proxies — not a version bump. Anything you
+remember from OWL 2 (`useState`, `reactive`, `t-esc`, implicit `this` in templates) is
+either gone or moved to a compatibility layer.
 
-1. [OWL 2 Overview](#1-owl-2-overview)
-2. [Component Structure](#2-component-structure)
-3. [Hooks](#3-hooks)
-4. [Services](#4-services)
-5. [Registries](#5-registries)
-6. [QWeb Templates](#6-qweb-templates)
-7. [Asset Bundling](#7-asset-bundling)
-8. [Common Patterns](#8-common-patterns)
-9. [Error Handling](#9-error-handling)
-10. [Inter-Component Communication](#10-inter-component-communication)
-11. [Lifecycle Deep-Dive](#11-lifecycle-deep-dive)
-12. [Performance Patterns](#12-performance-patterns)
-13. [Testing OWL Components](#13-testing-owl-components)
+**Working rule: before writing a component, open the nearest equivalent in
+`addons/web/static/src/` and copy its shape.** OWL 3 is still alpha and the idioms are set
+by what core does, not by external documentation.
 
----
-
-## 1. OWL 2 Overview
-
-Odoo 19 uses **OWL 2** natively — no `owl="1"` attribute needed. OWL is Odoo's reactive
-component framework (similar to React/Vue but XML-templated).
-
-**Key differences from OWL 1:**
-- No more `owl="1"` on templates
-- Composition API with hooks (like React hooks / Vue 3 Composition)
-- `useState`, `useRef`, `useEffect` patterns
-- `setup()` replaces constructor logic
-- Reactive state with fine-grained tracking
+1. [What changed from OWL 2](#1-what-changed-from-owl-2)
+2. [Canonical component](#2-canonical-component)
+3. [Reactivity: proxy, signal, computed](#3-reactivity-proxy-signal-computed)
+4. [Props with `useProps` and `t`](#4-props-with-useprops-and-t)
+5. [Effects and lifecycle](#5-effects-and-lifecycle)
+6. [Templates](#6-templates)
+7. [Services and registries](#7-services-and-registries)
+8. [Asset bundles](#8-asset-bundles)
+9. [Common patterns](#9-common-patterns)
+10. [Review checklist](#10-review-checklist)
 
 ---
 
-## 2. Component Structure
+## 1. What changed from OWL 2
 
-### Basic OWL 2 Component
+| OWL 2 | OWL 3 | Import |
+|---|---|---|
+| `useState(obj)` | `proxy(obj)` | `@odoo/owl` |
+| `reactive(obj)` | `proxy(obj)` | `@odoo/owl` |
+| — | `signal(v)`, `signal.ref()` | `@odoo/owl` |
+| computed getter | `computed(() => ...)`, **called**: `this.pages()` | `@odoo/owl` |
+| `static props = {...}` | `props = useProps(schema)` with `t.*` types | `@odoo/owl` |
+| `useEffect` | `useLayoutEffect` | `@web/owl2/utils` |
+| `onWillRender`, `onRendered` | same names | `@web/owl2/utils` |
+| `useEnv`, `useSubEnv`, `useChildSubEnv` | same names | `@web/owl2/utils` |
+| `useRef`, `useComponent`, `useExternalListener` | same names | `@web/owl2/utils` |
+| `t-esc` | `t-out` | — |
+| `t-slot="x"` | `t-call-slot="x"` | — |
+| implicit `props.x` in templates | explicit `this.props.x` | — |
+| `t-portal` | `t-custom-portal` | compat layer |
 
-```javascript
-/** @odoo-module */
+Counts in `addons/web/static/src`: `useState` 0, `proxy(` 146, `useProps(` 320,
+`signal.ref()` 143, `computed(` 73, `t-esc` 2, `t-slot=` 0, `t-call-slot=` 95.
 
-import { Component, useState } from "@odoo/owl";
-import { registry } from "@web/core/registry";
-import { useService } from "@web/core/utils/hooks";
+Importing a legacy hook from `@odoo/owl` fails. Legacy hooks come from `@web/owl2/utils`,
+which is a thin re-export — [addons/web/static/src/owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js).
 
-export class MyDashboard extends Component {
-    /**
-     * Dashboard component showing key metrics.
-     *
-     * @extends Component
-     */
-    static template = "my_module.MyDashboard";
-    static props = {
-        title: { type: String, optional: true },
-    };
+---
+
+## 2. Canonical component
+
+Straight from [addons/web/static/src/core/notebook/notebook.js](../../../../addons/web/static/src/core/notebook/notebook.js):
+
+```js
+import { useLayoutEffect } from "@web/owl2/utils";
+import { Component, computed, proxy, signal, t, useOnChange, useProps } from "@odoo/owl";
+
+export const notebookProps = {
+    slots: t.object().optional(),
+    pages: t.array().optional(),
+    className: t.string().optional(""),
+    defaultPage: t.string().optional(),
+    onPageUpdate: t.function().optional(() => () => {}),
+};
+
+export class Notebook extends Component {
+    static template = "web.Notebook";
+    props = useProps(notebookProps);
+
+    activePane = signal.ref();
 
     setup() {
-        /**
-         * Initialize component state and services.
-         * Called once when the component is created.
-         */
-        this.orm = useService("orm");
-        this.action = useService("action");
-        this.notification = useService("notification");
+        this.pages = computed(() => this.computePages(this.props));
+        this.state = proxy({ currentPage: null });
+        this.state.currentPage = this.computeActivePage(this.props.defaultPage, true);
 
-        this.state = useState({
-            records: [],
-            loading: true,
-            count: 0,
-        });
+        useLayoutEffect(
+            () => { this.props.onPageUpdate(this.state.currentPage); },
+            () => [this.state.currentPage],
+        );
 
-        this.loadData();
+        useOnChange(
+            () => [this.props.defaultPage],
+            (defaultPage) => { this.state.currentPage = this.computeActivePage(defaultPage, true); },
+            { initialRun: false },
+        );
     }
 
-    async loadData() {
-        /**
-         * Fetch dashboard data from the server.
-         */
-        try {
-            this.state.loading = true;
-            const records = await this.orm.searchRead(
-                "my.module.model",
-                [["state", "=", "confirmed"]],
-                ["name", "amount", "partner_id"],
-                { limit: 20, order: "create_date desc" }
-            );
-            this.state.records = records;
-            this.state.count = records.length;
-        } catch (error) {
-            this.notification.add(
-                "Failed to load dashboard data",
-                { type: "danger" }
-            );
-        } finally {
-            this.state.loading = false;
-        }
-    }
-
-    onRecordClick(record) {
-        /**
-         * Navigate to the record's form view.
-         *
-         * @param {Object} record - The clicked record data.
-         */
-        this.action.doAction({
-            type: "ir.actions.act_window",
-            res_model: "my.module.model",
-            res_id: record.id,
-            views: [[false, "form"]],
-            target: "current",
-        });
+    get navItems() {
+        return this.pages().filter((e) => e[1].isVisible);
     }
 }
 ```
 
-### OWL 2 Template (XML)
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<templates xml:space="preserve">
-    <t t-name="my_module.MyDashboard">
-        <div class="o_my_dashboard">
-            <div class="o_dashboard_header">
-                <h2 t-esc="props.title or 'Dashboard'"/>
-                <span class="badge bg-primary" t-esc="state.count"/>
-            </div>
-
-            <div t-if="state.loading" class="o_loading text-center p-4">
-                <i class="fa fa-spinner fa-spin fa-2x"/>
-            </div>
-
-            <div t-else="" class="o_dashboard_content">
-                <t t-foreach="state.records" t-as="record" t-key="record.id">
-                    <div class="o_dashboard_card card mb-2"
-                         t-on-click="() => this.onRecordClick(record)">
-                        <div class="card-body">
-                            <h5 class="card-title" t-esc="record.name"/>
-                            <p class="card-text">
-                                Amount: <t t-esc="record.amount"/>
-                            </p>
-                        </div>
-                    </div>
-                </t>
-
-                <div t-if="!state.records.length" class="text-muted p-4 text-center">
-                    No records found.
-                </div>
-            </div>
-        </div>
-    </t>
-</templates>
-```
+Shape rules:
+- `static template = "module.ComponentName"`
+- `props = useProps(schema)` as a class field, schema exported for reuse
+- refs as class fields: `myRef = signal.ref()`
+- everything reactive created in `setup()`
+- getters for derived values used once; `computed()` for derived values used repeatedly or
+  in dependency lists
 
 ---
 
-## 3. Hooks
+## 3. Reactivity: proxy, signal, computed
 
-### Common OWL 2 Hooks
+```js
+// mutable reactive object — the replacement for useState
+this.state = proxy({ count: 0, items: [] });
+this.state.count++;                   // triggers a re-render
 
-```javascript
-import { useState, useRef, useEffect, onWillStart, onMounted, onWillUnmount } from "@odoo/owl";
-import { useService } from "@web/core/utils/hooks";
+// a single reactive value
+const count = signal(0);
+count(1);                             // write
+count();                              // read
+
+// a DOM/component ref
+this.inputRef = signal.ref();         // template: t-ref="this.inputRef"
+this.inputRef()?.focus();
+
+// derived value — lazily evaluated, cached, called like a function
+this.total = computed(() => this.state.items.reduce((a, i) => a + i.price, 0));
+this.total();
+```
+
+- `proxy()` for an object you mutate in place (component state, a form buffer)
+- `signal()` for one value passed around or shared between components
+- `computed()` when the derivation is non-trivial or read from several places — a plain
+  getter re-runs on every access, `computed()` caches until a dependency changes
+- `computed()` and `signal()` results are **called**: `this.total()`, not `this.total`.
+  This is the most common OWL 3 mistake — a forgotten `()` renders the function.
+
+---
+
+## 4. Props with `useProps` and `t`
+
+```js
+export const myProps = {
+    record: t.object(),                       // required
+    readonly: t.boolean().optional(false),    // optional with default
+    label: t.string().optional(),
+    onChange: t.function().optional(() => () => {}),
+    slots: t.object().optional(),
+    extra: t.any().optional(),
+};
+
+export class MyField extends Component {
+    static template = "my_module.MyField";
+    props = useProps(myProps);
+}
+```
+
+- export the schema so other components can spread it (`{ ...myProps, extra: t.string() }`)
+- `.optional(defaultValue)` replaces the OWL 2 `static defaultProps`
+- `t.any()` only when the type genuinely varies — it disables validation
+
+---
+
+## 5. Effects and lifecycle
+
+```js
+import { useLayoutEffect, onWillRender } from "@web/owl2/utils";
+import { onWillStart, onMounted, onWillUnmount, useOnChange } from "@odoo/owl";
 
 setup() {
-    // Reactive state
-    this.state = useState({ count: 0, data: null });
+    onWillStart(async () => { this.data = await this.orm.call(...); });  // before first render
+    onMounted(() => { ... });                                            // DOM is live
+    onWillUnmount(() => { ... });                                        // cleanup
 
-    // DOM reference
-    this.inputRef = useRef("myInput");
+    useLayoutEffect(
+        () => { const id = setInterval(tick, 1000); return () => clearInterval(id); },
+        () => [this.state.enabled],     // dependency list, as a function
+    );
 
-    // Services
-    this.orm = useService("orm");
-    this.rpc = useService("rpc");
-    this.notification = useService("notification");
-    this.action = useService("action");
-    this.dialog = useService("dialog");
-    this.user = useService("user");
-
-    // Lifecycle: before first render (async allowed)
-    onWillStart(async () => {
-        this.state.data = await this.loadInitialData();
-    });
-
-    // Lifecycle: after DOM is mounted
-    onMounted(() => {
-        if (this.inputRef.el) {
-            this.inputRef.el.focus();
-        }
-    });
-
-    // Lifecycle: before unmount (cleanup)
-    onWillUnmount(() => {
-        // Clean up event listeners, intervals, etc.
-    });
-
-    // Reactive effect (re-runs when dependencies change)
-    useEffect(
-        () => {
-            console.log("Count changed to:", this.state.count);
-        },
-        () => [this.state.count]
+    useOnChange(
+        () => [this.props.resId],       // deps
+        (resId) => { this.load(resId); },
+        { initialRun: false },
     );
 }
 ```
 
+- `useLayoutEffect` takes `(effect, () => deps)` — the deps are a **function**
+- return a cleanup function from the effect; never leave a listener or interval behind
+- `useOnChange` is for "react to a prop changing", `useLayoutEffect` for "sync the DOM"
+- `onWillStart` for the initial async load; do not fetch in `setup()` directly
+
 ---
 
-## 4. Services
+## 6. Templates
 
-### Using Odoo Services
-
-```javascript
-// ORM service — for database operations
-this.orm = useService("orm");
-await this.orm.searchRead("res.partner", domain, fields, options);
-await this.orm.read("res.partner", [id], fields);
-await this.orm.create("res.partner", values);
-await this.orm.write("res.partner", [id], values);
-await this.orm.unlink("res.partner", [id]);
-await this.orm.call("res.partner", "method_name", args, kwargs);
-
-// Action service — for navigation
-this.action = useService("action");
-this.action.doAction("my_module.my_action_id");
-this.action.doAction({
-    type: "ir.actions.act_window",
-    res_model: "res.partner",
-    views: [[false, "list"], [false, "form"]],
-    domain: [["is_company", "=", true]],
-});
-
-// Notification service
-this.notification = useService("notification");
-this.notification.add("Record saved!", { type: "success", sticky: false });
-
-// Dialog service
-this.dialog = useService("dialog");
-
-// User service
-this.user = useService("user");
-const isAdmin = this.user.isAdmin;
-const userId = this.user.userId;
-
-// RPC service (low-level)
-this.rpc = useService("rpc");
-const result = await this.rpc("/my_module/endpoint", { param: "value" });
+```xml
+<t t-name="my_module.MyField">
+    <div t-attf-class="o_my_field {{ this.props.readonly ? 'o_readonly' : '' }}">
+        <span t-out="this.displayValue"/>
+        <t t-foreach="this.items()" t-as="item" t-key="item.id">
+            <button t-on-click="() => this.select(item)" t-out="item.name"/>
+        </t>
+        <input t-ref="this.inputRef" t-att-value="this.state.value"/>
+        <t t-if="this.props.slots" t-call-slot="default"/>
+        <MyChild prop="this.state.value" t-props="this.childProps"/>
+    </div>
+</t>
 ```
 
+Non-negotiable in OWL 3 templates:
+
+- **explicit `this.`** — `this.props.x`, `this.state.x`, `this.myGetter`
+- `t-out`, never `t-esc`
+- `computed`/`signal` values are **called**: `this.items()`
+- `t-key` on every `t-foreach`
+- `t-call-slot="name"` to render a slot, `t-set-slot="name"` to fill one
+- `t-ref="this.someSignalRef"` — the ref is a signal, not a string name
+- `t-custom-click="handler"` is an Odoo custom directive that also binds `auxclick`
+  (middle-click) — [addons/web/static/src/env.js:47](../../../../addons/web/static/src/env.js#L47)
+
+QWeb server-side templates follow the same `t-out` rule and additionally changed `t-call`
+parameter passing — see `views.md`.
+
 ---
 
-## 5. Registries
+## 7. Services and registries
 
-### Registering Components
+Unchanged in shape from v19:
 
-```javascript
+```js
 import { registry } from "@web/core/registry";
 
-// Register as a client action (accessible via menu/action)
-registry.category("actions").add("my_module.my_dashboard", MyDashboard);
-
-// Register as a systray item (top-right icons)
-registry.category("systray").add("my_module.MySystrayItem", {
-    Component: MySystrayItem,
-    isDisplayed: (env) => true,
-}, { sequence: 100 });
-
-// Register as a field widget
-registry.category("fields").add("my_custom_widget", {
-    component: MyCustomField,
-    supportedTypes: ["char", "text"],
-});
-
-// Register a service
 registry.category("services").add("myService", {
     dependencies: ["orm", "notification"],
     start(env, { orm, notification }) {
         return {
-            async doSomething() { /* ... */ },
+            async doThing(id) { return orm.call("my.model", "do_thing", [[id]]); },
         };
     },
 });
 ```
 
-### Client Action in XML
-
-```xml
-<record id="my_dashboard_action" model="ir.actions.client">
-    <field name="name">My Dashboard</field>
-    <field name="tag">my_module.my_dashboard</field>
-</record>
+```js
+import { useService } from "@web/core/utils/hooks";
+this.orm = useService("orm");
+this.notification = useService("notification");
 ```
 
----
+Common categories: `services`, `actions`, `fields`, `view_widgets`, `systray`, `main_components`,
+`formatters`, `parsers`, `command_provider`.
 
-## 6. QWeb Templates
-
-### QWeb Directives Cheat Sheet
-
-| Directive | Purpose | Example |
-|-----------|---------|---------|
-| `t-esc` | Output escaped text | `<span t-esc="record.name"/>` |
-| `t-out` | Output raw HTML (careful!) | `<div t-out="record.html_field"/>` |
-| `t-if` / `t-elif` / `t-else` | Conditional rendering | `<div t-if="state.loading">...` |
-| `t-foreach` / `t-as` / `t-key` | Loop iteration | `<t t-foreach="items" t-as="item" t-key="item.id">` |
-| `t-att-*` | Dynamic attribute | `<div t-att-class="state.active ? 'active' : ''"/>` |
-| `t-on-*` | Event handler | `<button t-on-click="onSave"/>` |
-| `t-ref` | DOM reference | `<input t-ref="myInput"/>` |
-| `t-component` | Render sub-component | `<t t-component="ChildComponent" data="props"/>` |
-| `t-slot` | Define slot content | `<t t-slot="default"/>` |
-| `t-set` / `t-value` | Variable assignment | `<t t-set="total" t-value="a + b"/>` |
-| `t-call` | Include sub-template | `<t t-call="my_module.sub_template"/>` |
-
-**Security note:** NEVER use `t-out` with user-provided content — XSS risk. Always use `t-esc`.
+v20 also introduces **plugins** (`usePlugin`, `*_plugin.js` in core, e.g. `orm_plugin`,
+`dialog_plugin`). Use a plugin only when you are extending a core feature that is already
+plugin-based; otherwise a service is still the right unit.
 
 ---
 
-## 7. Asset Bundling
-
-### In __manifest__.py
+## 8. Asset bundles
 
 ```python
 'assets': {
     'web.assets_backend': [
-        # JS components
-        'my_module/static/src/components/**/*.js',
-        'my_module/static/src/components/**/*.xml',
-        # SCSS styles
-        'my_module/static/src/scss/**/*.scss',
+        'my_module/static/src/**/*',
     ],
     'web.assets_frontend': [
-        # For website/portal components
-        'my_module/static/src/public/**/*.js',
+        'my_module/static/src/public/**/*',
+    ],
+    'web.assets_unit_tests': [
+        'my_module/static/tests/**/*',
     ],
 },
 ```
 
-### File Organization
-
-```
-static/src/
-├── components/
-│   ├── my_dashboard/
-│   │   ├── my_dashboard.js
-│   │   ├── my_dashboard.xml
-│   │   └── my_dashboard.scss
-│   └── my_widget/
-│       ├── my_widget.js
-│       └── my_widget.xml
-├── js/
-│   └── services/
-│       └── my_service.js
-└── scss/
-    └── my_module.scss
-```
+- `web.assets_backend` — the webclient
+- `web.assets_frontend` — website / portal
+- `web.assets_unit_tests` — hoot tests
+- glob the directory; do not list files one by one unless order matters
+- `('replace', old, new)`, `('remove', path)`, `('before', ref, path)` for surgical edits
 
 ---
 
-## 8. Common Patterns
+## 9. Common patterns
 
-### Form View Widget (Custom Field)
+```js
+// ORM call
+const records = await this.orm.searchRead("my.model", [["state", "=", "draft"]], ["name"]);
 
-```javascript
-/** @odoo-module */
+// notification
+this.notification.add(_t("Saved"), { type: "success" });
 
-import { Component, useState } from "@odoo/owl";
-import { registry } from "@web/core/registry";
-import { standardFieldProps } from "@web/views/fields/standard_field_props";
-
-export class ColorPickerField extends Component {
-    /**
-     * Custom color picker field widget.
-     * Renders a color input and syncs with the record field.
-     */
-    static template = "my_module.ColorPickerField";
-    static props = { ...standardFieldProps };
-
-    setup() {
-        this.state = useState({
-            color: this.props.record.data[this.props.name] || "#000000",
-        });
-    }
-
-    onColorChange(ev) {
-        /**
-         * Handle color change and update the record.
-         *
-         * @param {Event} ev - Input change event.
-         */
-        const color = ev.target.value;
-        this.state.color = color;
-        this.props.record.update({ [this.props.name]: color });
-    }
-}
-
-ColorPickerField.template = "my_module.ColorPickerField";
-
-registry.category("fields").add("color_picker", {
-    component: ColorPickerField,
-    supportedTypes: ["char"],
+// dialog
+this.dialog.add(ConfirmationDialog, {
+    body: _t("Delete this record?"),
+    confirm: () => this.delete(),
 });
-```
 
-### Extending Existing Views
-
-```javascript
-/** @odoo-module */
-
-import { patch } from "@web/core/utils/patch";
-import { FormController } from "@web/views/form/form_controller";
-
-patch(FormController.prototype, {
-    /**
-     * Extend form controller to add custom save logic.
-     */
-    async onRecordSaved(record) {
-        await super.onRecordSaved(record);
-        // Custom post-save logic
-        if (record.resModel === "my.module.model") {
-            this.notification.add("Custom save completed!", { type: "info" });
-        }
-    },
-});
-```
-
-### Debounced Search Input
-
-```javascript
+// debounce
 import { debounce } from "@web/core/utils/timing";
+this.onSearch = debounce(this.search.bind(this), 300);
 
-setup() {
-    this.state = useState({ searchTerm: "", results: [] });
-    this.orm = useService("orm");
-
-    // Debounced search — avoids flooding the server
-    this._debouncedSearch = debounce(this._performSearch.bind(this), 300);
-}
-
-onSearchInput(ev) {
-    this.state.searchTerm = ev.target.value;
-    this._debouncedSearch();
-}
-
-async _performSearch() {
-    /**
-     * Execute search query after debounce delay.
-     */
-    if (this.state.searchTerm.length < 2) {
-        this.state.results = [];
-        return;
-    }
-    this.state.results = await this.orm.searchRead(
-        "res.partner",
-        [["name", "ilike", this.state.searchTerm]],
-        ["name", "email"],
-        { limit: 10 }
-    );
-}
+// translation
+import { _t } from "@web/core/l10n/translation";
 ```
+
+`_t()` marks a translatable string; never build it from concatenation.
 
 ---
 
-## 9. Error Handling
+## 10. Review checklist
 
-### Try/catch with user notification:
-```javascript
-async onSave() {
-    try {
-        await this.orm.write("my.model", [this.recordId], this.getValues());
-        this.notification.add("Record saved successfully!", { type: "success" });
-    } catch (error) {
-        // Odoo RPC errors have a specific structure
-        if (error.data && error.data.message) {
-            this.notification.add(error.data.message, { type: "danger", sticky: true });
-        } else {
-            this.notification.add("An unexpected error occurred.", { type: "danger" });
-        }
-    }
-}
-```
-
-### Error boundary component:
-```javascript
-import { Component, onError, useState } from "@odoo/owl";
-
-export class ErrorBoundary extends Component {
-    static template = "my_module.ErrorBoundary";
-    static props = { slots: { type: Object } };
-
-    setup() {
-        this.state = useState({ hasError: false, error: null });
-        // OWL 2 error handling via onError hook
-        onError((error) => {
-            this.state.hasError = true;
-            this.state.error = error.message || "Unknown error";
-            console.error("[ErrorBoundary]", error);
-        });
-    }
-}
-```
-
-```xml
-<t t-name="my_module.ErrorBoundary">
-    <div t-if="state.hasError" class="alert alert-danger m-3">
-        <i class="fa fa-exclamation-triangle"/> Something went wrong.
-        <small class="d-block mt-1" t-esc="state.error"/>
-    </div>
-    <t t-else="" t-slot="default"/>
-</t>
-```
-
----
-
-## 10. Inter-Component Communication
-
-### Using the bus service (EventBus):
-```javascript
-import { useBus } from "@web/core/utils/hooks";
-
-setup() {
-    // Listen for events from other components
-    useBus(this.env.bus, "my-custom-event", (ev) => {
-        this.onCustomEvent(ev.detail);
-    });
-}
-
-// In another component, trigger the event:
-this.env.bus.trigger("my-custom-event", { recordId: 42 });
-```
-
-### Parent-child communication:
-```javascript
-// Parent passes callback as prop:
-// <ChildComponent onSelect.bind="onChildSelect"/>
-
-// Child calls the callback:
-this.props.onSelect(selectedData);
-```
-
-### Using a custom service for shared state:
-```javascript
-registry.category("services").add("mySharedState", {
-    start() {
-        let data = {};
-        return {
-            getData: () => data,
-            setData: (key, value) => { data[key] = value; },
-        };
-    },
-});
-
-// In components:
-this.sharedState = useService("mySharedState");
-const value = this.sharedState.getData();
-```
-
----
-
-## 11. Lifecycle Deep-Dive
-
-```
-Component Creation:
-  setup()                  → Initialize hooks, state, services
-  onWillStart() [async]    → Fetch data before first render
-  [first render]
-  onMounted()              → DOM is available, attach listeners
-
-Props/State Change:
-  onWillUpdateProps()      → New props incoming (before re-render)
-  [re-render]
-  onPatched()              → DOM updated after re-render
-
-Destruction:
-  onWillUnmount()          → Cleanup before DOM removal
-  [destroy]
-```
-
-### Key hooks:
-
-```javascript
-import { onWillStart, onMounted, onWillUnmount, onPatched, onWillUpdateProps } from "@odoo/owl";
-
-setup() {
-    onWillStart(async () => {
-        // Async data loading before first render
-        // Component is NOT in DOM yet
-    });
-
-    onMounted(() => {
-        // DOM is ready. Safe to use this.myRef.el
-        // Set up DOM listeners, third-party libraries
-    });
-
-    onPatched(() => {
-        // DOM was re-rendered after state/props change
-        // Good for: scrolling, canvas redraw, third-party lib update
-    });
-
-    onWillUpdateProps((nextProps) => {
-        // New props are about to be applied
-        // Good for: loading data based on new props
-        if (nextProps.recordId !== this.props.recordId) {
-            this.loadRecord(nextProps.recordId);
-        }
-    });
-
-    onWillUnmount(() => {
-        // CRITICAL: Clean up here
-        // Remove event listeners, destroy third-party instances,
-        // cancel pending RPCs, disconnect observers
-    });
-}
-```
-
----
-
-## 12. Performance Patterns
-
-### Avoid unnecessary re-renders:
-```javascript
-// BAD — creates a new object every render, causing child re-render
-get childProps() {
-    return { items: this.state.items.filter(i => i.active) };
-}
-
-// GOOD — use useState for derived state that changes rarely
-setup() {
-    this.state = useState({ items: [] });
-    this.filteredItems = useState({ value: [] });
-
-    useEffect(
-        () => {
-            this.filteredItems.value = this.state.items.filter(i => i.active);
-        },
-        () => [this.state.items]
-    );
-}
-```
-
-### Lazy-load heavy components:
-```javascript
-// Only load the component when needed (e.g., when a tab is clicked)
-import { Component, xml, useState } from "@odoo/owl";
-
-export class LazyTabContent extends Component {
-    static template = xml`
-        <div t-if="state.loaded">
-            <HeavyComponent data="state.data"/>
-        </div>
-        <div t-else="" t-on-click="load" class="btn btn-link">
-            Click to load...
-        </div>
-    `;
-
-    setup() {
-        this.state = useState({ loaded: false, data: null });
-    }
-
-    async load() {
-        this.state.data = await this.loadData();
-        this.state.loaded = true;
-    }
-}
-```
-
-### Cleanup resources in onWillUnmount:
-```javascript
-setup() {
-    this._interval = null;
-
-    onMounted(() => {
-        this._interval = setInterval(() => this.refresh(), 30000);
-    });
-
-    onWillUnmount(() => {
-        // ALWAYS clean up intervals, observers, event listeners
-        if (this._interval) {
-            clearInterval(this._interval);
-            this._interval = null;
-        }
-    });
-}
-```
-
----
-
-## 13. Testing OWL Components
-
-### Basic component test pattern:
-```javascript
-/** @odoo-module */
-
-import { mountComponent } from "@web/../tests/web_test_helpers";
-import { MyComponent } from "@my_module/components/my_component";
-
-QUnit.module("MyComponent", (hooks) => {
-    QUnit.test("renders correctly with initial data", async (assert) => {
-        const component = await mountComponent(MyComponent, {
-            props: {
-                title: "Test Title",
-            },
-        });
-
-        assert.containsOnce(component, ".o_my_component");
-        assert.strictEqual(
-            component.el.querySelector("h2").textContent,
-            "Test Title"
-        );
-    });
-
-    QUnit.test("handles click event", async (assert) => {
-        const component = await mountComponent(MyComponent, {
-            props: {
-                onSelect: (value) => {
-                    assert.step(`selected:${value}`);
-                },
-            },
-        });
-
-        await click(component.el.querySelector(".o_select_btn"));
-        assert.verifySteps(["selected:expected_value"]);
-    });
-});
-```
+- [ ] No `useState` / `reactive` — `proxy()` instead
+- [ ] Legacy hooks imported from `@web/owl2/utils`, not `@odoo/owl`
+- [ ] `computed` / `signal` values are called with `()` in JS **and** in templates
+- [ ] `props = useProps(schema)` with `t.*` types; schema exported
+- [ ] Every `t-foreach` has `t-key`
+- [ ] `t-out` everywhere, no `t-esc`
+- [ ] Explicit `this.` in every template expression
+- [ ] Effects return their cleanup; no leaked listeners or timers
+- [ ] Async loading in `onWillStart`, not in `setup()`
+- [ ] User-facing strings wrapped in `_t()`
+- [ ] Component shape matches the nearest core component you copied from

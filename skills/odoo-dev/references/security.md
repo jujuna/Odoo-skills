@@ -1,546 +1,359 @@
-# Security Deep-Dive — Odoo 19+
+# Security — Odoo 20
 
-## Table of Contents
+Odoo 20 replaced `ir.model.access` **and** `ir.rule` with a single model, `ir.access`.
+If you write v19-style security files they will not load. Read section 1 before writing
+any security file.
 
-1. [Security Layers Overview](#1-security-layers)
-2. [Security Groups](#2-security-groups)
-3. [Access Control Lists (ACLs)](#3-acls)
-4. [Record Rules](#4-record-rules)
-5. [Field-Level Security](#5-field-level-security)
-6. [sudo() Best Practices](#6-sudo-best-practices)
-7. [Raw SQL Safety](#7-raw-sql-safety)
-8. [Controller Security](#8-controller-security)
-9. [Multi-Company Security](#9-multi-company-security)
-10. [Common Vulnerabilities](#10-common-vulnerabilities)
-11. [Portal User Security](#11-portal-user-security)
-12. [CSRF Protection](#12-csrf-protection)
-13. [@api.ondelete](#13-apiondelete)
-14. [Data File Security](#14-data-file-security)
-15. [Sensitive Data Handling](#15-sensitive-data-handling)
-16. [Programmatic Access Checks (v19)](#16-programmatic-access-checks-v19)
+Source: [odoo/addons/base/models/ir_access.py](../../../../odoo/addons/base/models/ir_access.py),
+[odoo/orm/models.py:3603](../../../../odoo/orm/models.py#L3603) (`_access_domain`).
 
----
-
-## 1. Security Layers
-
-Odoo security works in layers. All layers must pass for access to be granted:
-
-```
-User Request
-    ↓
-[1] Security Groups — Does the user belong to a group that has access?
-    ↓
-[2] Access Rights (ACLs) — Can this group CRUD this model?
-    ↓
-[3] Record Rules — Can this user access THIS specific record?
-    ↓
-[4] Field Access — Can this user see/edit THIS specific field?
-    ↓
-Access Granted
-```
+1. [The one access model](#1-the-one-access-model)
+2. [Writing `ir.access.csv`](#2-writing-iraccesscsv)
+3. [Groups and privileges](#3-groups-and-privileges)
+4. [The `access` domain operator](#4-the-access-domain-operator)
+5. [Field-level security](#5-field-level-security)
+6. [Programmatic access checks](#6-programmatic-access-checks)
+7. [`sudo()` discipline](#7-sudo-discipline)
+8. [Portal and public routes](#8-portal-and-public-routes)
+9. [Raw SQL safety](#9-raw-sql-safety)
+10. [CSRF and webhooks](#10-csrf-and-webhooks)
+11. [Secrets and sensitive data](#11-secrets-and-sensitive-data)
+12. [Vulnerability table](#12-vulnerability-table)
 
 ---
 
-## 2. Security Groups
+## 1. The one access model
 
-### Template: `security/groups.xml`
+Every access row is an `ir.access` record. The `group_id` decides what the row *is*:
+
+| `group_id` | Kind | Effect |
+|---|---|---|
+| set | **permission** | grants the listed operations on matching records |
+| empty | **restriction** | limits the listed operations for *everyone*, including admins of other companies |
+
+The ORM resolves them into one domain per operation:
+
+```python
+# odoo/orm/models.py:3647
+return Domain.OR(permissions) & Domain.AND(restrictions)
+```
+
+Three consequences you must internalize:
+
+- **No permission row → no access.** `Domain.OR([])` is `FALSE`. A new model with no
+  `ir.access.csv` row is invisible to every non-superuser.
+- **Permissions are unioned.** A user in two groups gets the union of their domains. To
+  widen access, add a row; never edit another module's row.
+- **Restrictions are intersected and unconditional.** This is where multi-company scoping
+  lives. A restriction cannot be escaped by adding a group.
+
+The evaluation context for `domain` is `user`, `time`, `company_id`, `company_ids` —
+[ir_access.py:`_eval_context`](../../../../odoo/addons/base/models/ir_access.py#L312).
+
+---
+
+## 2. Writing `ir.access.csv`
+
+One file per module: `security/ir.access.csv`. The header is fixed and identical in all
+506 core files:
+
+```csv
+id,name,model_id,group_id/id,operation,domain
+```
+
+| Column | Value |
+|---|---|
+| `id` | XML id, unique in the module |
+| `name` | human label, shown in access-error messages |
+| `model_id` | the **model name** (`sale.order`), not `model_sale_order` |
+| `group_id/id` | group XML id, or empty for a restriction |
+| `operation` | a subset of `crud` in that order: `r`, `ru`, `cru`, `crud`, `cud`, … |
+| `domain` | optional; quoted if it contains commas |
+
+`operation` is a single Selection value, not four booleans. The legal subsets are listed in
+[`CRUD_SELECTION`](../../../../odoo/addons/base/models/ir_access.py#L16).
+
+### Template
+
+```csv
+id,name,model_id,group_id/id,operation,domain
+access_my_model_user,my.model user,my.model,my_module.group_my_module_user,cru,
+access_my_model_manager,my.model manager,my.model,my_module.group_my_module_manager,crud,
+access_my_model_line_user,my.model.line user,my.model.line,my_module.group_my_module_user,crud,
+my_model_comp_rule,My Model multi-company,my.model,,crud,"[('company_id', 'in', company_ids)]"
+my_model_own_records,My Model: own records only,my.model,my_module.group_my_module_user,cru,"[('user_id', '=', user.id)]"
+access_my_wizard,my.wizard,my.wizard,base.group_user,crud,"[('create_uid', '=', user.id)]"
+```
+
+Read the real thing before writing your own —
+[addons/sale/security/ir.access.csv](../../../../addons/sale/security/ir.access.csv).
+
+### Manifest placement
+
+```python
+'data': [
+    'security/my_module_security.xml',   # groups + privilege — FIRST
+    'data/...', 'report/...', 'wizard/...', 'views/...', 'views/menus.xml',
+    'security/ir.access.csv',            # access — LAST
+],
+```
+
+Verified in `account`, `stock`, `project`, `hr`, `purchase`, `mail`, `sale`: groups file is
+entry 0, `ir.access.csv` is the last entry. This is the opposite of the v19 convention.
+
+### Translating a v19 module
+
+| v19 | v20 |
+|---|---|
+| `perm_read=1,perm_write=1,perm_create=1,perm_unlink=0` | `operation` = `cru` |
+| `perm_read=1` only | `operation` = `r` |
+| `<record model="ir.rule">` with `groups` | a permission row with that group + `domain` |
+| `<record model="ir.rule">` without `groups` | a restriction row (empty `group_id`) + `domain` |
+| `domain_force` | the `domain` column |
+| one ACL row + one rule row for the same group | **one** row carrying both |
+
+---
+
+## 3. Groups and privileges
+
+File: `security/<module>_security.xml`, first in `data`. Three levels:
+`ir.module.category` ▶ `res.groups.privilege` ▶ `res.groups`.
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Module category (top-level) -->
-    <record id="module_category_my_module" model="ir.module.category">
+<data>
+    <record model="res.groups.privilege" id="res_groups_privilege_my_module">
         <field name="name">My Module</field>
-        <field name="description">Manage my module operations</field>
         <field name="sequence">20</field>
+        <field name="category_id" ref="base.module_category_operations"/>
     </record>
 
-    <!-- Privilege (v19+ intermediary between category and groups) -->
-    <record id="my_module_privilege" model="res.groups.privilege">
-        <field name="name">My Module</field>
-        <field name="category_id" ref="module_category_my_module"/>
-        <field name="sequence">20</field>
-    </record>
-
-    <!-- User group -->
     <record id="group_my_module_user" model="res.groups">
         <field name="name">User</field>
-        <field name="privilege_id" ref="my_module_privilege"/>
+        <field name="sequence">10</field>
+        <field name="privilege_id" ref="res_groups_privilege_my_module"/>
         <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
     </record>
 
-    <!-- Manager group (inherits User) -->
     <record id="group_my_module_manager" model="res.groups">
-        <field name="name">Manager</field>
-        <field name="privilege_id" ref="my_module_privilege"/>
+        <field name="name">Administrator</field>
+        <field name="sequence">20</field>
+        <field name="privilege_id" ref="res_groups_privilege_my_module"/>
         <field name="implied_ids" eval="[(4, ref('group_my_module_user'))]"/>
         <field name="user_ids" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
     </record>
+</data>
 </odoo>
 ```
 
-**Rules (v19):**
-- `res.groups` no longer has `category_id` — it has `privilege_id` linking to `res.groups.privilege`, which in turn has `category_id`. Three-level hierarchy: `ir.module.category` ▶ `res.groups.privilege` ▶ `res.groups`.
-- Field name for default users on a group is `user_ids`, not `users`.
-- Manager always implies User.
-- Admin/root users should be in Manager group by default.
-- Use `implied_ids` to create group hierarchy (never duplicate permissions).
-- Reference example in core: [`addons/account/security/account_security.xml`](../../../addons/account/security/account_security.xml) — uses `res_groups_privilege_accounting` as the privilege bridge.
+Pattern copied from
+[addons/purchase/security/purchase_security.xml](../../../../addons/purchase/security/purchase_security.xml).
+
+- `res.groups` has no `category_id` — it has `privilege_id` (labelled "Scope" in the UI)
+- `user_ids`, not `users`
+- Manager implies User; never restate a permission a group already implies
+- A group with no privilege is a plain feature flag (e.g. `group_warning_purchase`)
+- `res.groups.access_ids` is the reverse of `ir.access.group_id` (was `model_access` +
+  `rule_groups`)
 
 ---
 
-## 3. Access Control Lists (ACLs)
+## 4. The `access` domain operator
 
-### Template: `security/ir.model.access.csv`
+New in v20. On a many2one (or `id`), `('field', 'access', 'read')` means *"the user must
+have that operation on the related record"*. It replaces hand-copied cross-model domains
+on line/detail models.
 
 ```csv
-id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_my_model_user,my.model.user,model_my_model,group_my_module_user,1,1,1,0
-access_my_model_manager,my.model.manager,model_my_model,group_my_module_manager,1,1,1,1
-access_my_model_line_user,my.model.line.user,model_my_model_line,group_my_module_user,1,1,1,1
+sale_order_line_rule_portal,Portal Sales Orders Line,sale.order.line,base.group_portal,r,"[('order_id', 'access', 'read')]"
+base_user_account_move_line_rule,Normal User Account Move Line,account.move.line,sales_team.group_sale_salesman,r,"[('move_id', 'access', 'read')]"
 ```
 
-**Rules:**
-- One entry per model per group — use unique `id` values
-- Users typically cannot unlink (delete) — only managers
-- Every model MUST have at least one ACL entry
-- `model_id:id` uses `model_` prefix + model name with dots → underscores
-- Empty `group_id:id` = applies to ALL users (including portal) — use with extreme caution
+Use it for every child model whose visibility should follow its parent. It keeps the two
+in sync forever, and it is what the access-error message uses to name the groups that
+would grant access.
+
+Constraints — [odoo/orm/domains.py:1921](../../../../odoo/orm/domains.py#L1921):
+- only `many2one` fields and `id`
+- value must be `'read'`, `'write'`, `'create'` or `'unlink'`
+- not supported on properties
 
 ---
 
-## 4. Record Rules
-
-### Template: `security/rules.xml`
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<odoo>
-    <!-- Multi-company rule (ALWAYS include for multi-company models) -->
-    <record id="rule_my_model_company" model="ir.rule">
-        <field name="name">My Model: Multi-Company</field>
-        <field name="model_id" ref="model_my_model"/>
-        <field name="domain_force">
-            ['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]
-        </field>
-    </record>
-
-    <!-- User sees own records only -->
-    <record id="rule_my_model_user" model="ir.rule">
-        <field name="name">My Model: User Own Records</field>
-        <field name="model_id" ref="model_my_model"/>
-        <field name="domain_force">
-            [('user_id', '=', user.id)]
-        </field>
-        <field name="groups" eval="[(4, ref('group_my_module_user'))]"/>
-    </record>
-
-    <!-- Manager sees all records (empty domain = allow all) -->
-    <record id="rule_my_model_manager" model="ir.rule">
-        <field name="name">My Model: Manager All Records</field>
-        <field name="model_id" ref="model_my_model"/>
-        <field name="domain_force">[(1, '=', 1)]</field>
-        <field name="groups" eval="[(4, ref('group_my_module_manager'))]"/>
-    </record>
-</odoo>
-```
-
-**Important rules:**
-- Global rules (no `groups`) are **intersected** (all must pass)
-- Group rules are **unioned** (any matching rule grants access)
-- Multi-company rules should always be **global** (no groups)
-- `company_ids` = all companies the user has access to (list)
-- `company_id` = user's currently selected company (single id)
-
----
-
-## 5. Field-Level Security
+## 5. Field-level security
 
 ```python
-# Restrict field visibility to specific groups
-secret_notes = fields.Text(
-    string='Secret Notes',
+internal_cost = fields.Monetary(
+    string="Internal Cost",
+    currency_field='currency_id',
     groups='my_module.group_my_module_manager',
 )
 ```
 
-In XML views:
 ```xml
 <field name="internal_cost" groups="my_module.group_my_module_manager"/>
 ```
 
+A `groups=` field is stripped from reads, writes, exports and the web client for users
+outside the group — enforced by `check_field_access()` /
+`has_field_access()`, [models.py:2703](../../../../odoo/orm/models.py#L2703). Put it on the
+field first; the view attribute alone only hides it in the UI.
+
 ---
 
-## 6. sudo() Best Practices
+## 6. Programmatic access checks
 
-### When sudo() is justified:
-- Creating records in models the user doesn't have write access to (e.g., creating an invoice from a sale order)
-- Reading configuration that's not accessible to the current user
-- System operations in cron jobs
+```python
+records.check_access('read')            # raises AccessError
+if records.has_access('write'): ...     # bool
+allowed = records._filtered_access('unlink')   # the subset the user may touch
+self.env['my.model'].browse().check_access('create')   # model-level check
 
-### Mandatory pattern:
+model.check_field_access(model._fields['cost'], 'write')   # raises
+model.has_field_access(model._fields['cost'], 'read')      # bool
+```
+
+- operations: `'read'`, `'write'`, `'create'`, `'unlink'`
+- all of them short-circuit to "allowed" under `sudo()` / `env.su` — call them on the
+  **non-sudoed** recordset
+- `create()` / `write()` / `unlink()` already call `check_access` internally; only re-check
+  when you bypass the ORM or wrap something in `sudo()`
+- `Model._access_domain(op)` returns the resolved domain — useful for debugging why a
+  record is invisible, and it is `@api.ormcache`'d on `self.env._access_context`
+
+---
+
+## 7. `sudo()` discipline
+
+Order of operations, every time:
 
 ```python
 def action_generate_invoice(self):
-    """Generate invoice for confirmed orders.
-
-    Uses sudo() for invoice creation because sale users may not have
-    direct write access to account.move. User's permission to trigger
-    this action is verified by group check.
-    """
     self.ensure_one()
-    # Step 1: Validate current user has the right
+    # 1. permission: is this user allowed to trigger the action at all?
     if not self.env.user.has_group('sale.group_sale_salesman'):
-        raise AccessError(_("Only salespersons can generate invoices."))
-    # Step 2: Validate business logic BEFORE sudo
-    if self.state != 'confirmed':
-        raise UserError(_("Only confirmed orders can be invoiced."))
-    # Step 3: Prepare values WITHOUT sudo (use current user's access)
-    invoice_vals = self._prepare_invoice_values()
-    # Step 4: Create with sudo, with clear comment
-    # sudo() needed: sale user has no write access to account.move
-    invoice = self.env['account.move'].sudo().create(invoice_vals)
-    return invoice
+        raise AccessError(self.env._("Only salespersons can generate invoices."))
+    # 2. business state, before any sudo
+    if self.state != 'sale':
+        raise UserError(self.env._("Only confirmed orders can be invoiced."))
+    # 3. prepare values with the user's own rights
+    invoice_vals = self._prepare_invoice()
+    # 4. sudo only for the step that needs it, with the reason on one line
+    # sudo: sale users have no create access on account.move
+    return self.env['account.move'].sudo().create(invoice_vals)
 ```
 
-### sudo() anti-patterns to AVOID:
+Never:
 
 ```python
-# NEVER: sudo() to silence access errors without understanding why
-records = self.sudo().search([])
-
-# NEVER: sudo() on user input without validation
-self.sudo().write({'field': user_provided_value})
-
-# NEVER: sudo() that exposes cross-company data
-other_company_records = self.sudo().search([('company_id', '!=', self.env.company.id)])
+records = self.sudo().search([])                      # silencing an access error
+self.sudo().write({'field': value_from_request})      # unvalidated user input
+self.sudo().search([('company_id', '!=', self.env.company.id)])   # cross-company leak
 ```
+
+`sudo()` bypasses `ir.access` completely — both permissions and restrictions, which means
+it also bypasses every multi-company restriction. Any `sudo()` on a company-scoped model
+must re-add the company filter by hand.
 
 ---
 
-## 7. Raw SQL Safety
-
-**Rule: Never use raw SQL when the ORM can do the job.**
-
-When raw SQL is unavoidable:
+## 8. Portal and public routes
 
 ```python
-def _get_complex_report_data(self):
-    """Fetch report data using raw SQL for complex aggregation.
-
-    Raw SQL justified: The required LATERAL JOIN and window functions
-    cannot be expressed via the ORM.
-    """
-    # ALWAYS use parameterized queries
-    self.env.cr.execute("""
-        SELECT
-            p.id,
-            p.name,
-            COUNT(o.id) AS order_count,
-            SUM(o.amount_total) AS total_amount
-        FROM res_partner p
-        LEFT JOIN sale_order o ON o.partner_id = p.id
-        WHERE p.company_id = %s
-            AND o.state IN %s
-            AND o.date_order >= %s
-        GROUP BY p.id, p.name
-        HAVING SUM(o.amount_total) > %s
-    """, (
-        self.env.company.id,
-        tuple(['sale', 'done']),
-        fields.Date.today() - timedelta(days=365),
-        1000.0,
-    ))
-    return self.env.cr.dictfetchall()
-```
-
-**NEVER:**
-```python
-# SQL injection — CRITICAL vulnerability
-self.env.cr.execute(f"SELECT * FROM res_partner WHERE name = '{name}'")
-self.env.cr.execute("SELECT * FROM res_partner WHERE name = '%s'" % name)
-self.env.cr.execute("SELECT * FROM res_partner WHERE name = " + name)
-```
-
----
-
-## 8. Controller Security
-
-```python
-from odoo import http
-from odoo.http import request
-
-class MyController(http.Controller):
-
-    @http.route('/my_module/data', type='jsonrpc', auth='user', methods=['POST'])
-    def get_data(self, **kwargs):
-        """Fetch data for authenticated users only.
-
-        Auth types:
-          - 'user': Requires login (internal users)
-          - 'public': No login required
-          - 'none': No auth, no env — use for health checks only
-        """
-        # Always validate input
-        record_id = kwargs.get('record_id')
-        if not record_id or not isinstance(record_id, int):
-            raise ValueError("Invalid record ID")
-
-        # Access through ORM respects security rules
-        record = request.env['my.model'].browse(record_id)
-        record.check_access('read')  # v19: explicit access check
-
-        return {'name': record.name, 'state': record.state}
-```
-
-**Note:** In v19, `type='json'` is a deprecated alias of `type='jsonrpc'`.
-Use `type='jsonrpc'` in new code.
-
----
-
-## 9. Multi-Company Security
-
-```python
-class MyModel(models.Model):
-    """Multi-company aware model."""
-
-    _name = 'my.model'
-    _description = 'My Model'
-
-    company_id = fields.Many2one(
-        'res.company',
-        string='Company',
-        required=True,
-        default=lambda self: self.env.company,
-        index=True,
-    )
-
-    # The ORM enforces company consistency automatically when check_company=True
-    partner_id = fields.Many2one('res.partner', check_company=True)
-```
-
----
-
-## 10. Common Vulnerabilities
-
-| Vulnerability | Example | Fix |
-|--------------|---------|-----|
-| SQL Injection | `execute(f"... {user_input}")` | Always use `%s` params |
-| Broken Access | Public method calls `sudo()` | Validate group before sudo |
-| IDOR | `browse(user_provided_id)` without check | Call `check_access('read')` |
-| XSS in QWeb | `t-raw` with user input | Use `t-esc` or sanitize |
-| Stored XSS via SVG | Uploading an SVG with an embedded script | `Binary`/`Image` fields block SVG for non-admin users by default — keep it; sanitize any custom upload endpoint that bypasses the field |
-| Mass Assignment | `write(request.params)` | Whitelist allowed fields |
-| Cross-Company Leak | Missing company record rule | Always add company rule |
-| Path Traversal | User-controlled file path | Validate / sanitize paths |
-| Open Redirect | Redirect to user URL | Validate redirect target is internal |
-| Timing Attack | String `==` for secrets | Use `hmac.compare_digest()` |
-
----
-
-## 11. Portal User Security
-
-Portal users have minimal permissions. Extra care is needed when exposing
-data to them.
-
-### Portal record rules:
-```xml
-<!-- Portal user can only see their own records -->
-<record id="rule_my_model_portal" model="ir.rule">
-    <field name="name">My Model: Portal Own Records</field>
-    <field name="model_id" ref="model_my_model"/>
-    <field name="domain_force">
-        [('partner_id', '=', user.partner_id.id)]
-    </field>
-    <field name="groups" eval="[(4, ref('base.group_portal'))]"/>
-</record>
-```
-
-### Portal controller pattern:
-```python
-from odoo.addons.portal.controllers.portal import CustomerPortal
-
 class MyPortal(CustomerPortal):
-    """Portal controller for my module."""
-
-    @http.route('/my/records', type='http', auth='user', website=True)
-    def portal_my_records(self, **kwargs):
-        """Display portal user's records.
-
-        Auth type 'user' ensures login is required.
-        Always filter by partner to prevent IDOR.
-        """
-        partner = request.env.user.partner_id
-        records = request.env['my.model'].sudo().search([
-            ('partner_id', '=', partner.id),
-        ])
-        # sudo() justified: portal user has no ACL on my.model,
-        # but we pre-filter by their partner_id above
-        return request.render('my_module.portal_records', {
-            'records': records,
-        })
 
     @http.route('/my/records/<int:record_id>', type='http', auth='user', website=True)
-    def portal_my_record_detail(self, record_id, **kwargs):
-        """Display a single record detail for portal user.
-
-        CRITICAL: Must verify the record belongs to the logged-in user.
-        """
+    def portal_record(self, record_id, **kw):
         record = request.env['my.model'].sudo().browse(record_id)
-        if not record.exists():
-            raise request.not_found()
-        # IDOR prevention: verify ownership
-        if record.partner_id != request.env.user.partner_id:
-            raise request.not_found()  # 404 instead of 403 to avoid info leak
-        return request.render('my_module.portal_record_detail', {
-            'record': record,
-        })
+        if not record.exists() or record.partner_id != request.env.user.partner_id:
+            raise request.not_found()      # 404, not 403 — do not confirm the id exists
+        return request.render('my_module.portal_record', {'record': record})
 ```
 
-**Portal rules:**
-- ALWAYS filter by `partner_id` — never trust the URL parameter alone
-- Return 404 (not 403) for records that don't belong to the user (prevents enumeration)
-- Use `sudo()` with partner filter — portal users have no direct ACL on most models
-- Never expose internal fields (cost, margin, notes) in portal templates
+- filter by `partner_id` (or `commercial_partner_id`) yourself — never trust the URL id
+- 404 on mismatch, so ids cannot be enumerated
+- `sudo()` here is justified *because* of the explicit ownership filter above it — say so
+- never expose cost, margin, internal notes or other staff-only fields in portal templates
+- portal access rows use `base.group_portal` with a domain, e.g.
+  `[('partner_id','child_of',[user.commercial_partner_id.id])]`
 
 ---
 
-## 12. CSRF Protection
+## 9. Raw SQL safety
 
-Odoo has built-in CSRF protection for HTTP controllers. Understand when
-it's active and when you might accidentally bypass it.
+Raw SQL bypasses `ir.access` entirely — there is no ACL, no record rule, no company
+restriction. Use the ORM for business CRUD; use SQL only for reporting shapes the ORM
+cannot express, and re-apply the security filter yourself.
 
 ```python
-# SAFE — CSRF token is automatically included in forms rendered by QWeb
-@http.route('/my/submit', type='http', auth='user', methods=['POST'], website=True)
-def submit_form(self, **post):
-    """Handle form submission with automatic CSRF validation."""
-    # Odoo validates the csrf_token automatically for type='http' POST
-    ...
+self.env.cr.execute("""
+    SELECT p.id, COUNT(o.id) AS order_count, SUM(o.amount_total) AS total
+      FROM res_partner p
+      LEFT JOIN sale_order o ON o.partner_id = p.id
+     WHERE o.company_id IN %s
+       AND o.state IN %s
+       AND o.date_order >= %s
+     GROUP BY p.id
+""", (tuple(self.env.companies.ids), ('sale',), date_from))
+rows = self.env.cr.dictfetchall()
+```
 
-# SAFE — JSON-RPC calls don't need CSRF (they use session auth)
-@http.route('/my/api', type='jsonrpc', auth='user', methods=['POST'])
-def api_call(self, **kwargs):
-    """API endpoint — CSRF not applicable for JSON-RPC."""
-    ...
+Never build SQL with `f""`, `%`-formatting or `+`. Prefer `odoo.tools.SQL` for composed
+queries — it is injection-safe by construction.
 
-# DANGEROUS — explicitly disabling CSRF
+---
+
+## 10. CSRF and webhooks
+
+- `type='http'` POST routes are CSRF-checked automatically; QWeb forms include the token
+- `type='jsonrpc'` uses session auth and is not CSRF-relevant
+- `csrf=False` is only for endpoints that must accept external callers, and it must be
+  paired with a real authentication step:
+
+```python
 @http.route('/my/webhook', type='http', auth='none', csrf=False, methods=['POST'])
-def webhook_receiver(self, **post):
-    """Receive external webhook — CSRF disabled.
-
-    WARNING: csrf=False means anyone can POST to this endpoint.
-    Always validate the request using a shared secret or signature.
-    """
-    secret = post.get('secret')
-    if not hmac.compare_digest(secret or '', WEBHOOK_SECRET):
+def webhook(self, **post):
+    if not hmac.compare_digest(post.get('signature', ''), expected_signature):
         raise Forbidden()
-    ...
 ```
 
-**CSRF rules:**
-- Never use `csrf=False` unless the endpoint must accept external webhooks
-- When `csrf=False`, authenticate the request another way (API key, HMAC signature)
-- Use `hmac.compare_digest()` for timing-safe secret comparison
-- QWeb templates automatically include `csrf_token` in forms — don't remove it
+Use `hmac.compare_digest` for every secret comparison — `==` leaks timing.
 
 ---
 
-## 13. @api.ondelete
+## 11. Secrets and sensitive data
 
-Modern Odoo (v16+) provides `@api.ondelete` as the preferred way to restrict
-record deletion. See SKILL.md section 2.3 for details and examples.
-
-Key security aspect: `@api.ondelete` runs BEFORE cascade deletes on related
-records, so it catches violations that `unlink()` overrides might miss.
-
----
-
-## 14. Data File Security
-
-### Sensitive data in XML data files:
-```xml
-<!-- NEVER hardcode secrets in data files -->
-<!-- BAD -->
-<record id="my_config" model="ir.config_parameter">
-    <field name="key">my_module.api_key</field>
-    <field name="value">sk_live_abc123</field>  <!-- NEVER -->
-</record>
-
-<!-- GOOD — set empty, let admin configure via UI -->
-<record id="my_config" model="ir.config_parameter">
-    <field name="key">my_module.api_key</field>
-    <field name="value"></field>
-</record>
-```
-
-### Protecting config parameters:
 ```python
-# Reading config parameters safely
-api_key = self.env['ir.config_parameter'].sudo().get_param(
-    'my_module.api_key', default=''
-)
+# never in a data file
+<field name="value">sk_live_abc123</field>
+
+# ship it empty, let the admin fill it
+<field name="value"></field>
+
+api_key = self.env['ir.config_parameter'].sudo().get_param('my_module.api_key')
 if not api_key:
-    raise UserError(_("API key not configured. Go to Settings > Technical > Parameters."))
+    raise UserError(self.env._("API key not configured (Settings > Technical > Parameters)."))
 ```
+
+- never log a password, token or key — `_logger.info("calling %s", url)` is fine
+- token fields carry `groups='base.group_system'` and `copy=False`
+- `ir.config_parameter` reads need `sudo()`; that is expected and does not need a comment
 
 ---
 
-## 15. Sensitive Data Handling
+## 12. Vulnerability table
 
-```python
-# NEVER log sensitive data
-_logger.info("API key: %s", api_key)  # FORBIDDEN
-_logger.info("Password: %s", password)  # FORBIDDEN
-_logger.info("API call made to %s", url)  # OK — no secrets
-
-# NEVER store plaintext passwords
-# Use Odoo's built-in hashing for custom auth:
-from odoo.addons.base.models.res_users import check_identity
-
-# For API tokens, use ir.config_parameter (encrypted at rest in some deployments)
-# or fields with groups restriction:
-api_token = fields.Char(
-    string='API Token',
-    groups='base.group_system',  # only admin can see
-    copy=False,
-)
-```
-
----
-
-## 16. Programmatic Access Checks (v19)
-
-When you need to enforce ACLs + record rules in Python (controllers, sudo flows, RPC entry points), use the v19 access API. It replaces the split `check_access_rights()` (ACL) / `check_access_rule()` (record rules) pair with one operation-based interface.
-
-```python
-# Raise AccessError if the user cannot perform the operation on every record in self
-records.check_access('read')
-
-# Boolean variant — same logic, no exception
-if records.has_access('write'):
-    ...
-
-# Drop the records the user is not allowed to touch, keep the rest
-allowed = records._filtered_access('unlink')
-allowed.unlink()
-
-# Model-level check (no specific records): use an empty recordset
-self.env['my.model'].browse().check_access('create')
-```
-
-**Rules:**
-- `operation` is one of `'read'`, `'write'`, `'create'`, `'unlink'`.
-- `check_access(op)` raises `AccessError`; `has_access(op)` returns a bool; `_filtered_access(op)` returns the subset the user may act on.
-- All three return early (allow everything) under superuser (`self.env.su` / `sudo()`) — they check the *current* user, so call them on the non-sudoed recordset.
-- For IDOR protection in portal/public controllers, validate ownership and call `check_access('read')` on the real recordset before exposing data. Return 404 (not 403) on mismatch.
-- `create()`, `write()`, and `unlink()` already call `check_access(...)` internally; do not re-check unless you bypass the ORM (raw SQL) or sudo around it.
-
-**Deprecated forms (since 18.0):**
-
-| Deprecated | Replacement |
-|---|---|
-| `check_access_rights(op, raise_exception=True)` | `check_access(op)` |
-| `check_access_rights(op, raise_exception=False)` | `has_access(op)` |
-| `check_access_rule(op)` | `check_access(op)` |
-| `_filter_access_rules(op)` / `_filter_access_rules_python(op)` | `_filtered_access(op)` |
+| Vulnerability | Shape | Fix |
+|---|---|---|
+| SQL injection | `execute(f"... {value}")` | `%s` parameters or `tools.SQL` |
+| Missing access row | new model, no `ir.access.csv` entry | nobody can use it — add the row |
+| Over-broad permission | empty `group_id` used to "grant to all" | empty group means **restriction**, not grant |
+| IDOR | `browse(id_from_url)` with no ownership check | ownership filter + `check_access('read')` + 404 |
+| Broken access via sudo | `sudo()` before validating the user | permission check → state check → `sudo()` |
+| Cross-company leak | no restriction row, or `sudo()` on a scoped model | company restriction + re-filter under `sudo()` |
+| XSS in QWeb | `t-out` on raw HTML from users | escape, or sanitize the stored HTML |
+| Stored XSS via SVG | SVG upload | `Binary`/`Image` block SVG for non-admins — keep it |
+| Mass assignment | `write(request.params)` | whitelist the fields |
+| Path traversal | user-controlled file path | validate against a fixed root |
+| Open redirect | redirect to a user-supplied URL | allow only internal targets |
+| Timing attack | `token == expected` | `hmac.compare_digest` |

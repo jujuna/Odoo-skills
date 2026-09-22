@@ -1,4 +1,4 @@
-# Performance Patterns — Odoo 19+
+# Performance Patterns — Odoo 20
 
 ## Table of Contents
 
@@ -232,22 +232,41 @@ records = self.search_fetch(domain, ['partner_id', 'state'], order='id')
 
 ## 5. Computed Fields Strategy
 
-### When to store:
+### v20: `compute_sql` before `store=True`
+
+The old reflex — "it needs to be searchable, so store it" — is wrong in v20. A
+`compute_sql` field is searchable, groupable and sortable with **no column, no index, no
+recompute traffic and no staleness**.
+
+```python
+currency_id = fields.Many2one(
+    'res.currency',
+    compute='_compute_currency_id',
+    compute_sql='_compute_sql_currency_id',
+    compute_sudo=True,
+)
+
+def _compute_sql_currency_id(self, table):
+    return SQL("COALESCE(%s, %s)", table.company_id.currency_id, fallback_currency_id)
+```
+
+Decision order: plain compute → `compute_sql` → `search='_method'` → `store=True`.
+
+### When storing is still right:
 ```python
 # STORE when:
-# - Field is used in search/filter/group_by
-# - Field is displayed in list views (computed per page load)
-# - Computation is expensive
-# - Dependencies change infrequently
+# - the value cannot be expressed in SQL
+# - it is read far more often than its dependencies change
+# - the computation is genuinely expensive and its inputs are stable
 total = fields.Float(compute='_compute_total', store=True)
 ```
 
 ### When NOT to store:
 ```python
 # DON'T STORE when:
-# - Dependencies change on almost every write
-# - Field is only on form view (single record)
-# - Storage cost outweighs computation cost
+# - dependencies change on almost every write
+# - the field is only shown on a form view (single record)
+# - the value is time-dependent (it silently goes stale)
 current_age = fields.Integer(compute='_compute_current_age')  # changes daily
 ```
 
@@ -325,7 +344,7 @@ records.with_context(mail_create_nolog=True, tracking_disable=True).create(vals_
 
 ## 7. Database Indexes
 
-### v19 syntax for indexes:
+### Index syntax:
 ```python
 class MyModel(models.Model):
     _name = 'my.model'
@@ -336,7 +355,7 @@ class MyModel(models.Model):
     state = fields.Selection([...], index=True)
     date = fields.Date(index=True)
 
-    # Composite indexes (v19): declare named class attributes
+    # Composite indexes: declare named class attributes
     _partner_state_idx = models.Index("(partner_id, state)")
     _company_date_idx = models.Index("(company_id, date)")
 ```
@@ -476,7 +495,7 @@ def action_debug_performance(self):
 
 ## 11. Relational Search Access
 
-In Odoo 19, use `bypass_search_access` intentionally on relational fields when you
+Use `bypass_search_access` intentionally on relational fields when you
 need to bypass comodel search access checks. This is primarily a security behavior,
 not a generic performance switch.
 
@@ -497,7 +516,7 @@ class MyModel(models.Model):
 - Prefer normal relational fields (default access checks) in business code
 - Treat `bypass_search_access=True` as security-sensitive and justify it with a comment
 - Optimize search performance with proper domains and indexes, not access-bypass flags
-- `auto_join` was removed in v19. To filter on related records efficiently, use the `any` / `not any` domain operators (see `orm.md` section 4) rather than the old join flag.
+- `auto_join` was removed. To filter on related records efficiently, use the `any` / `not any` domain operators (see `orm.md` section 4) rather than the old join flag.
 
 ---
 

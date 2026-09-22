@@ -1,4 +1,4 @@
-# Wizards (TransientModel) — Odoo 19+
+# Wizards (TransientModel) — Odoo 20
 
 ## Table of Contents
 
@@ -31,9 +31,11 @@ class MyWizard(models.TransientModel):
 **Key differences from `Model`:**
 - No permanent DB storage — auto-cleaned by `_transient_vacuum()`
 - No `mail.thread` or `mail.activity.mixin` — not needed
-- No record rules needed (each user sees only their own transient records)
-- ACL is still required in `ir.model.access.csv`
 - No `active` field, no archiving
+- **Access is exactly the same as a regular model.** A `TransientModel` does *not*
+  auto-filter by `create_uid` — the class docstring says it "uses the same access rights
+  mechanisms as a regular Model". Without rows in `security/ir.access.csv`, nobody can open
+  the wizard; without an ownership domain, one user can read another user's wizard record.
 
 ---
 
@@ -390,18 +392,22 @@ return {
 
 ## 7. Wizard Security
 
-### ACL (required):
+### `security/ir.access.csv` (required):
 ```csv
-id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_my_wizard_user,my.module.wizard.user,model_my_module_wizard,group_my_module_user,1,1,1,1
+id,name,model_id,group_id/id,operation,domain
+access_my_wizard_user,my.module.wizard user,my.module.wizard,my_module.group_my_module_user,crud,
+my_wizard_own_rule,My Wizard: own records only,my.module.wizard,,crud,"[('create_uid', '=', user.id)]"
+access_my_wizard_line,my.module.wizard.line,my.module.wizard.line,my_module.group_my_module_user,crud,
 ```
 
 ### Key rules:
-- Always add ACL for wizard models — even though they're transient
-- No record rules needed — TransientModel auto-filters by `create_uid`
-- Wizard line models also need ACL entries
-- Use `groups=` on the binding action or button to restrict who can open it
-- Validate permissions inside the wizard action method — don't assume the button group is enough
+- Always add access rows for wizard models — transient does not mean unprotected
+- **Add the ownership restriction** `[('create_uid', '=', user.id)]` with an empty
+  `group_id`. 22 core access files do exactly this; the ORM does not do it for you.
+- Wizard line models need their own rows, or `[('wizard_id', 'access', 'read')]`
+- Use `groups=` on the binding action or the button to restrict who can open it
+- Validate permissions inside the wizard's `action_*` method — the button's group is a UI
+  hint, not a security boundary
 
 ---
 

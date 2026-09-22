@@ -1,4 +1,4 @@
-# Fields — Odoo 19+
+# Fields — Odoo 20
 
 Reference for declaring fields, computes, relations, constraints, and onchanges. Sourced from `odoo/orm/fields.py`, `fields_relational.py`, `fields_binary.py`, and `decorators.py`.
 
@@ -87,6 +87,52 @@ Key compute attributes (`fields.py`):
 - `recursive=True` — **required** when the field depends on itself through a relation (`parent_id.x`). Must be explicit or recomputation is wrong.
 - `inverse='_method'` — makes a non-stored/computed field writable; the inverse persists the assignment.
 - `search='_method'` — makes a non-stored field searchable. Receives `(operator, value)`, returns a domain, or `return NotImplemented` for unsupported operators. Domain optimizations run first (e.g. `=` becomes `in`).
+- `compute_sql='_method'` — **v20**. Expresses the field in SQL so it can be searched, grouped *and* ordered without storing it. Requires an explicit `compute_sudo=`. See section 4b.
+- `init_storage='_method'` — **v20**. Populates the column when it is first created.
+
+### Storage decision order
+
+Take the first one that works:
+
+1. plain `compute` — the value is only ever read per record
+2. `compute` + `compute_sql` — it must be searchable / groupable / sortable
+3. `compute` + `search='_method'` — it must be searchable but cannot be expressed in SQL
+4. `compute` + `store=True` — the value is stable and read far more often than written
+
+`store=True` is the expensive option: a column, an index, recompute traffic on every
+dependency write, and a stale-data risk. Do not reach for it just to enable a filter.
+
+---
+
+## 4b. `compute_sql` (v20)
+
+```python
+currency_id = fields.Many2one(
+    'res.currency', 'Currency',
+    compute='_compute_currency_id',
+    compute_sql='_compute_sql_currency_id',
+    compute_sudo=True,              # mandatory when compute_sql is set
+)
+
+@api.depends('company_id')
+def _compute_currency_id(self):
+    for template in self:
+        template.currency_id = template.company_id.sudo().currency_id or main_currency
+
+def _compute_sql_currency_id(self, table):
+    main_company = self.env['res.company']._get_main_company()
+    return SQL("COALESCE(%s, %s)", table.company_id.currency_id, main_company.currency_id.id)
+```
+
+- the SQL method takes `(self, table)` where `table` is a `TableSQL`, and returns an `SQL`
+- `table` supports **dotted traversal that auto-joins**: `table.company_id.currency_id`
+- keep the Python compute and the SQL expression in sync — they must give the same value
+- the framework warns if `compute_sql` is set without `compute`, or without an explicit
+  `compute_sudo` ([odoo/orm/fields.py:471](../../../../odoo/orm/fields.py#L471))
+
+82 core fields use it. Real examples:
+[product_template.py:99](../../../../addons/product/models/product_template.py#L99),
+[mail_activity_mixin.py:172](../../../../addons/mail/models/mail_activity_mixin.py#L172).
 
 **Rules:**
 - Compute methods assign the field for *every* record in `self`.
@@ -133,7 +179,7 @@ partner_id = fields.Many2one('res.partner', ondelete='restrict', check_company=T
 - `bypass_search_access=True` — skip comodel access-rule checks during search. Security-sensitive; justify with a comment.
 - `domain`, `context` — client-side candidate filtering / context.
 
-> `auto_join` was **removed** in v19. Relational filtering now uses the `any` / `not any` domain operators and the search-access model (see `orm.md` section 4).
+> `auto_join` was **removed**. Relational filtering now uses the `any` / `not any` domain operators and the search-access model (see `orm.md` section 4).
 
 ### One2many
 
@@ -270,11 +316,24 @@ def _onchange_partner_id(self):
 
 ---
 
-## 12. v19 Field Changes
+## 12. v20 Field Changes
 
-| Old | New (v19) | Notes |
+| Old | New | Notes |
 |---|---|---|
-| `group_operator='sum'` | `aggregator='sum'` | Deprecated since 18.0; warns |
-| `auto_join=True` | _(removed)_ | Use `any`/`not any` domain operators + `bypass_search_access` |
-| `index=True` only | `index='btree_not_null'` / `'trigram'` | Pick the index kind to fit the query |
-| `fields.Date.today()` (default) | `fields.Date.today` | Callable, no parens |
+| `store=True` to enable search/groupby | `compute_sql='_method'` | v20 — no column, no recompute traffic |
+| — | `init_storage='_method'` | v20 — populate a new column at install |
+| `uom.rounding` | `env['decimal.precision'].precision_get('Product Unit')` | the UoM `rounding` field is gone |
+| `digits='Product Price'` for display only | `min_display_digits='Product Price'` | controls the minimum decimals shown |
+| `group_operator='sum'` | `aggregator='sum'` | deprecated since 18.0; warns |
+| `auto_join=True` | `bypass_search_access=True` | plus `any` / `not any` domain operators |
+| `index=True` only | `index='btree_not_null'` / `'trigram'` | pick the index kind to fit the query |
+| `fields.Date.today()` (default) | `fields.Date.today` | callable, no parens |
+
+Rounding quantities in v20:
+
+```python
+digits = self.env['decimal.precision'].precision_get('Product Unit')
+fields.Float.round(self.product_uom_qty, precision_digits=digits)
+fields.Float.is_zero(self.product_uom_qty, precision_digits=digits)
+fields.Float.compare(self.product_uom_qty, self.qty_done, precision_digits=digits)
+```

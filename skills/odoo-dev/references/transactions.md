@@ -1,4 +1,4 @@
-# Transaction, Commit, Savepoint, and Cache Safety — Odoo 19+
+# Transaction, Commit, Savepoint, and Cache Safety — Odoo 20
 
 Use this whenever code touches `cr.commit()`, `cr.rollback()`, savepoints, raw SQL writes,
 external side effects, cron chunking, queue jobs, imports, or cache invalidation.
@@ -246,7 +246,7 @@ for tx in transactions:
 
 ## 10. Row Locking for Concurrency
 
-When two transactions may modify the same rows (worker queues, sequence gaps, inventory reservations, "process exactly once" flows), take an explicit write-lock instead of hand-writing `SELECT ... FOR UPDATE`. v19 exposes two ORM methods on every recordset.
+When two transactions may modify the same rows (worker queues, sequence gaps, inventory reservations, "process exactly once" flows), take an explicit write-lock instead of hand-writing `SELECT ... FOR UPDATE`. The ORM exposes two methods on every recordset.
 
 ```python
 from odoo.exceptions import LockError

@@ -1,4 +1,4 @@
-# Python Best Practices — Odoo 19+ (Python 3.10+)
+# Python Best Practices — Odoo 20 (Python 3.12–3.14)
 
 This file covers the Python language layer for Odoo code. For ORM-specific
 contracts (recordsets, CRUD overrides, domains, transactions, multi-company),
@@ -57,8 +57,8 @@ def _split_into_batches(self, records, size: int = 200) -> Iterable:
 **Rules:**
 - Use on private helpers and utility methods
 - Skip on `create`, `write`, `unlink`, `search` overrides (signature is defined by ORM)
-- Use `dict` not `Dict`, `list` not `List` (Python 3.10+)
-- Use `X | None` not `Optional[X]` (Python 3.10+)
+- Use `dict` not `Dict`, `list` not `List`
+- Use `X | None` not `Optional[X]`; PEP 695 generics (`def f[T](...)`) are available
 
 ---
 
@@ -236,20 +236,22 @@ for record, vals in zip(records, vals_list):
 
 ### Translation-safe string formatting:
 ```python
-from odoo import _
-
-# CORRECT — %s inside _() for translation extraction
-msg = _("Order %s cannot be deleted (state: %s).", self.name, self.state)
+# CORRECT — self.env._() needs no import and uses the env's language
+msg = self.env._("Order %s cannot be deleted (state: %s).", self.name, self.state)
 
 # CORRECT — named placeholders for complex messages
-msg = _("%(count)s orders for partner %(partner)s.", count=len(self), partner=self.partner_id.name)
+msg = self.env._("%(count)s orders for %(partner)s.", count=len(self), partner=self.partner_id.name)
 
-# WRONG — f-string breaks translation tooling
-msg = _(f"Order {self.name} cannot be deleted.")
+# WRONG — f-string breaks translation extraction
+msg = self.env._(f"Order {self.name} cannot be deleted.")
 
 # WRONG — .format() also breaks extraction
-msg = _("Order {} cannot be deleted.".format(self.name))
+msg = self.env._("Order {} cannot be deleted.".format(self.name))
 ```
+
+`self.env._()` is the preferred form in v19+ and is what new core code uses. The imported
+`from odoo import _` still works and is fine in module-level constants or where no `env` is
+in scope; do not mix the two styles inside one file.
 
 ### String building for large outputs:
 ```python
@@ -389,7 +391,7 @@ valid = [
 
 ## 9. Match Statements
 
-Python 3.10+ structural pattern matching — useful for state machines and
+Structural pattern matching — useful for state machines and
 dispatchers in Odoo.
 
 ```python
@@ -938,6 +940,85 @@ def _prepare_lines_by_product(self):
 - Keep recordsets as recordsets until IDs are required for SQL, RPC, or serialization.
 - Avoid "smart" abstractions unless they remove real duplication or make batch behavior safer.
 
+### Collapse redundant branches; keep distinct ones
+
+Merge guards and branches that are the *same* thing written several times; keep
+branches that genuinely *differ*. The wins below are behavior-preserving — apply
+them; the guardrails after are where merging silently breaks things — respect them.
+
+```python
+# BAD — consecutive guards with an identical body
+if self.move_type not in ('out_refund', 'in_refund'):
+    return
+if self.rs_einv_k_type_user_set:
+    return
+if self.rs_einv_k_type:
+    return
+self.rs_einv_k_type = self._suggest_k_type()
+
+# GOOD — one guard. `A or B or C` short-circuits exactly like the sequential
+# ifs, so a later condition (even one that calls a method) still runs only when
+# the earlier ones are False. Identical behavior.
+if (self.move_type not in ('out_refund', 'in_refund')
+        or self.rs_einv_k_type_user_set
+        or self.rs_einv_k_type):
+    return
+self.rs_einv_k_type = self._suggest_k_type()
+```
+
+```python
+# BAD — if/else assigns the SAME fields, differing only in which side is seller
+if is_buyer_side:
+    move.seller_tin = move.partner_id.vat or False
+    move.seller_name = move.partner_id.name or False
+    move.buyer_tin = move.company_id.vat or False
+    move.buyer_name = move.company_id.name or False
+else:
+    move.seller_tin = move.company_id.vat or False
+    move.seller_name = move.company_id.name or False
+    move.buyer_tin = move.partner_id.vat or False
+    move.buyer_name = move.partner_id.name or False
+
+# GOOD — pick the operands once, assign once
+seller, buyer = (
+    (move.partner_id, move.company_id) if is_buyer_side
+    else (move.company_id, move.partner_id)
+)
+move.seller_tin = seller.vat or False
+move.seller_name = seller.name or False
+move.buyer_tin = buyer.vat or False
+move.buyer_name = buyer.name or False
+```
+
+```python
+# BAD — guard then else over one target           # BAD — branches set one field, then continue
+flag = getattr(result, 'someResult', None)         for line in self:
+if flag is None:                                       if not line.move_id.rs_einv_id:
+    success = bool(result)                                 line.state = 'not_sent'
+else:                                                       line.synced = False
+    success = bool(flag)                                    continue
+                                                       ...
+# GOOD — value-pick                                 # GOOD — elif over the target; derive the rest once
+success = bool(flag if flag is not None else result)  for line in self:
+                                                          if not line.move_id.rs_einv_id:
+                                                              line.state = 'not_sent'
+                                                          elif ...:
+                                                              line.state = ...
+                                                          else:
+                                                              line.state = ...
+                                                          line.synced = line.state in SYNCED_STATES
+```
+
+**Rules:**
+- Merge consecutive `if COND: return` / `continue` / `return X` guards that share an **identical body** into one `if A or B or ...:`. This is *always* behavior-preserving — `or` evaluates in the same order with the same short-circuit as the separate ifs, even when a condition has a side effect or calls a method.
+- Collapse if/else that assigns the **same target(s)** differing only by value into a ternary, or a `(a, b) if cond else (c, d)` value-pick, then assign once.
+- Turn a single-target guard cascade into one `if/elif/else` chain and compute any **derived** field once after it, instead of repeating that line in every branch.
+
+**Do NOT merge when:**
+- **Bodies differ** — guards that `raise` *different* `UserError`/`ValidationError` messages, or branches that set different dict *keys* / different fields / log different text. The specific message and shape is the whole point; keep them separate.
+- **Code sits between the guards** — an assignment between two `if`s means they are not consecutive; merging would reorder logic or skip a needed step.
+- **Readability drops** — do not fold a long multi-line expression into a trailing `... if cond else x`. A two-line if/else beats a cramped ternary.
+
 ### Avoid unnecessary allocations
 
 ```python
@@ -1185,13 +1266,13 @@ intentionally, and keep side effects visible.
 For pure, frequently-called, rarely-changing lookups (config resolution, permission maps, parsed metadata), cache the result with Odoo's registry-aware cache — never `functools.lru_cache` / `functools.cache`.
 
 ```python
-from odoo.tools import ormcache
+from odoo import api, models
 
 
 class ResCompany(models.Model):
     _inherit = 'res.company'
 
-    @ormcache('self.env.company.id', 'feature_code')
+    @api.ormcache('self.env.company.id', 'feature_code')
     def _get_feature_setting(self, feature_code):
         """Return a cached primitive — never a recordset."""
         param = self.env['ir.config_parameter'].sudo().get_param(f'mymod.{feature_code}')
@@ -1206,6 +1287,8 @@ class ResCompany(models.Model):
 - Arguments are string expressions over the method signature; they build the key (which always also includes `self._name` and the method). Examples: `'model_name'`, `'self.env.uid'`, `'self.env.company.id'`.
 - **Never return a recordset** — return ids, dicts, tuples, or scalars, and `browse()` again in the caller. A cached recordset raises `psycopg2.InterfaceError` once its cursor closes.
 - Cache only pure functions of the key: no side effects, and no context-sensitive result unless that context value is part of the key.
-- Invalidate when the underlying data changes: `self.env.registry.clear_cache()` (or `clear_cache('name')` for one bucket, `clear_all_caches()` for everything).
-- `@ormcache(skiparg=...)` and `@ormcache_context(...)` are **deprecated since 19.0** — use `@ormcache(...)` and put context values in the key directly, e.g. `@ormcache('self.env.context.get("lang")')`.
-- Use `@ormcache(..., cache='name')` to put an entry in a named bucket you can invalidate independently.
+- **v20 import: `from odoo import api` → `@api.ormcache(...)`.** `odoo.tools.ormcache` still resolves but warns, and `ormcache_context` is gone.
+- Invalidate when the underlying data changes: `self.env.transaction.invalidate_ormcache()` (or `invalidate_ormcache('name')` for one bucket). `registry.clear_cache()` was **removed in v20**.
+- `@ormcache(skiparg=...)` and `@ormcache_context(...)` are gone — put context values in the key directly, e.g. `@api.ormcache('self.env.context.get("lang")')`.
+- Use `@api.ormcache(cache='name')` for a named bucket you can invalidate independently. Core uses `'stable'` for access data and `'groups'` for group implications.
+- For a whole small reference table read on nearly every request, `models.CachedModel` does this for you — see `v20-changes.md` section 6.

@@ -1,4 +1,4 @@
-# SQL & PostgreSQL Patterns — Odoo 19+
+# SQL & PostgreSQL Patterns — Odoo 20
 
 ## Table of Contents
 
@@ -86,7 +86,8 @@ count = self.env.cr.fetchone()[0]
 
 ### Using the SQL builder (v18+):
 ```python
-from odoo.tools import SQL
+from odoo.tools import SQL           # composed, injection-safe SQL
+from odoo.models import Query      # v20: moved from odoo.tools
 
 # SQL builder is injection-safe by construction
 query = SQL(
@@ -360,7 +361,7 @@ SET auto_explain.log_analyze = true;
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
 
-    # v19 composite indexes for common query patterns
+    # composite indexes for common query patterns
     _partner_state_idx = models.Index("(partner_id, state)")
     _company_date_order_idx = models.Index("(company_id, date_order)")
     _state_create_date_idx = models.Index("(state, create_date)")
@@ -445,9 +446,13 @@ GROUP BY "sale_order_line"."order_id";
 
 ## 8. Migrations and Data Scripts
 
+> **Not our practice.** Do not write migration scripts in this project (see `simplicity.md` §9).
+> Handle data changes in code — a compute, a field default, or a fill-only-if-empty pass.
+> This section is reference-only, for reading migration scripts that already exist in `addons/`.
+
 ### Pre-migration script (runs BEFORE module update):
 ```python
-# migrations/19.0.1.1.0/pre-migrate.py
+# migrations/<version>/pre-migrate.py
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -468,7 +473,7 @@ def migrate(cr, version):
 
 ### Post-migration script (runs AFTER module update):
 ```python
-# migrations/19.0.1.1.0/post-migrate.py
+# migrations/<version>/post-migrate.py
 import logging
 from odoo import SUPERUSER_ID, api
 
@@ -492,14 +497,14 @@ def migrate(cr, version):
 
 ### End-migration script (runs at the very end):
 ```python
-# migrations/19.0.1.1.0/end-migrate.py
+# migrations/<version>/end-migrate.py
 # Use for operations that need the fully updated registry
 ```
 
 ### Migration folder naming:
 ```
 migrations/
-└── 19.0.1.1.0/          # matches new version in __manifest__.py
+└── <version>/           # matches the new version in __manifest__.py
     ├── pre-migrate.py    # before ORM update
     ├── post-migrate.py   # after ORM update
     └── end-migrate.py    # after all modules updated
