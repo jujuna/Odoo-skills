@@ -402,7 +402,7 @@ Also proven while installing the gec modules on a test database (2026-09-23):
   so crons and `odoo-bin shell` scripts must use a real user (`with_user(...)`) to set
   `allow_out_payment`.
 - Payroll: `hr.salary.rule.category_id` no longer exists and the xmlid
-  `hr_payroll.hr_payslip_run_view_kanban` is gone (replacements not checked yet).
+  `hr_payroll.hr_payslip_run_view_kanban` is gone. Payroll replacements: §12.
 
 Found while planning the `l10n_ge` merge of `gec_localization` + `gec_l10n_ge_tax` (2026-09-23):
 
@@ -453,7 +453,87 @@ Found while planning the `l10n_ge` merge of `gec_localization` + `gec_l10n_ge_ta
 
 ---
 
-## 12. Unchanged — do not "fix" these
+## 12. Payroll: rules, inputs, versions, pay runs
+
+Verified while reviewing `geo_payroll` (2026-09-23). v20 `hr_payroll` is a redesign, not a rename
+pass. Paths are under `enterprise/hr_payroll/` unless noted.
+
+**Salary rules** ([models/hr_salary_rule.py](../../../../enterprise/hr_payroll/models/hr_salary_rule.py)):
+
+| v19 | v20 |
+|---|---|
+| `struct_id` Many2one | `struct_ids` Many2many, required (:27, commit `c2f18f3de7e`) |
+| `category_id` Many2one | `category_ids` Many2many (:49, commit `778de155cc1`); same on `hr.payslip.line` |
+| `appears_on_payslip` Boolean | Selection `always` / `never` / `non_zero` (:52) |
+| `condition_select` / `amount_select` value `input` + `*_other_input_id` | gone; `property_input` reads `inputs[rule.code]` (:60, :71) |
+
+- Data files: write `category_ids` as `[(6, 0, [ref(...)])]` or `[(5, 0, 0)]`, and set `country_id`,
+  `condition_select`, `amount_select` and the python code explicitly. `create()` logs one warning
+  per rule otherwise (:378), and the rule country defaults to the installing company's country.
+- A non-superuser editing a critical field (code, formula, categories, structures) flips the rule's
+  xmlid to `noupdate` and sets `modified_by_user` (:430): a `noupdate="0"` rule stops receiving
+  module upgrades once an accountant edits its formula. Account fields are not critical.
+
+**Inputs** — `hr.payslip.input.type` is deleted (commit `ed42b78f2c0`). `hr.payslip.input` points to
+`salary_rule_id` ([hr_payslip_input.py:22](../../../../enterprise/hr_payroll/models/hr_payslip_input.py#L22)),
+its `code` is the rule's code, and a rule that reads `inputs['X']` sets `input_usage_payslip=True`
+(core: `default_deduction_salary_rule` in `data/hr_salary_rule_data.xml`). `inputs['X']` is still the
+input record with `.amount` / `.name` ([hr_payslip.py:1661](../../../../enterprise/hr_payroll/models/hr_payslip.py#L1661)).
+Also gone: `hr.payroll.structure.input_line_type_ids`, `hr.payslip.payslip_properties`,
+`_compute_payslip_properties`.
+
+**BASIC is pre-filled.** `_get_localdict` seeds `categories` from worked days through
+`hr.work.entry.type.category_ids` ([hr_payslip.py:1645](../../../../enterprise/hr_payroll/models/hr_payslip.py#L1645));
+core maps `generic_work_entry_type_attendance` to BASIC (`data/hr_work_entry_type_data.xml`).
+`payslip.paid_amount` / `_get_paid_amount()` are gone (commit `abfbb6bc98b`). The core BASIC rule is
+now `category_ids=[(5, 0, 0)]` with `result = payslip._get_basic_salary()` and
+`if not categories['BASIC']: categories['BASIC'] = result`. A v19 BASIC rule that keeps category BASIC
+counts attendance twice in GROSS; a paid work entry type without a category is shown on the BASIC
+line but missing from GROSS.
+
+**One payslip spans several versions.** `_compute_worked_days_line_ids` adds every version with the same
+`(employee, contract_date_start, contract_date_end)` ([hr_version.py:653](../../../../enterprise/hr_payroll/models/hr_version.py#L653))
+whose `date_version` falls in the slip period ([hr_payslip.py:2180](../../../../enterprise/hr_payroll/models/hr_payslip.py#L2180)),
+and prices each worked-day line with its own `version_id`. A second, manually created slip for the
+later version pays that slice again.
+
+**Pay runs** ([models/hr_payslip_run.py](../../../../enterprise/hr_payroll/models/hr_payslip_run.py)):
+
+| v19 | v20 |
+|---|---|
+| `_get_valid_version_ids(...)` → ids | `_get_valid_versions(...)` → recordset, one version per contract, effective at `date_start` (:131) |
+| `generate_payslips(version_ids, employee_ids)` | `_generate_payslips()`, no args, from `self.version_ids`, filtered on the structure type (:585) |
+| `action_payroll_hr_version_list_view_payrun(..., schedule_pay)` | 5th argument is `employee_type_ids`; the action lists employees, not versions (:550) |
+| `schedule_pay` field | gone |
+| `structure_id` optional | required, defaults to the first structure of the company country (:51) |
+
+`version_ids` is stored and filled at create from `_get_valid_versions` (:182).
+
+**Also removed or renamed:**
+
+| v19 | v20 |
+|---|---|
+| `hr.payslip.action_edit_payslip_lines` + `hr.payroll.edit.payslip.lines.wizard` | inline line edits: `write()` → `_recompute_with_forced_lines()` ([hr_payslip.py:787](../../../../enterprise/hr_payroll/models/hr_payslip.py#L787)); lines before the edited sequence are forced with their stored, cent-rounded `amount` × `quantity` |
+| `hr.payslip._filter_not_in_contract_payslips` | warning record `hr_payroll_warning_no_running_contract` (`data/hr_payroll_warning_data.xml:436`), which skips slips with `ignore_worked_day_lines` |
+| `correct_sheet()` | `_action_correct_payslips()` now copies the origin's input lines ([hr_payslip.py:1221](../../../../enterprise/hr_payroll/models/hr_payslip.py#L1221)) |
+| `hr.payroll.structure.unpaid_work_entry_type_ids` | gone; `is_paid` is `amount_rate != 0` |
+| `hr.version.work_entry_source`, `contract_wage` | gone; attendance tracking is `attendance_based` (Boolean, `hr_attendance`) |
+| `hr.version.hourly_wage` Monetary | Float, 4 digits |
+| xmlid `hr_work_entry.work_entry_type_attendance` / `work_entry_type_unpaid_leave` | `hr_work_entry.generic_work_entry_type_attendance` / `generic_work_entry_type_unpaid_leave` |
+| menu `hr_work_entry_enterprise.menu_hr_payroll_root` | `hr_payroll.menu_hr_payroll_root` (module deleted) |
+
+**Register payment**: core keeps the `hr_payroll_payment_register` context and its
+`_reconcile_payments` hook, but no longer opens the wizard from a payslip. Re-implement the action
+without `super()`, the way [l10n_au_hr_payroll_account/models/hr_payslip.py:491](../../../../enterprise/l10n_au_hr_payroll_account/models/hr_payslip.py#L491)
+does, and add the form button.
+
+**Batch moves**: with `company.batch_payroll_move_lines`, `_get_account_move_vals` also posts the run's
+**draft** slips ([hr_payroll_account/models/hr_payslip.py:56](../../../../enterprise/hr_payroll_account/models/hr_payslip.py#L56)).
+An override that validates slip by slip lets the first slip post the others before their checks run.
+
+---
+
+## 13. Unchanged — do not "fix" these
 
 Still correct in v20, despite churn elsewhere:
 
