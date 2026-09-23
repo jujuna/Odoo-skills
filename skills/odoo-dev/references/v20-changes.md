@@ -432,8 +432,24 @@ Found while planning the `l10n_ge` merge of `gec_localization` + `gec_l10n_ge_ta
   The form has no `page[@name='Description']` any more.
 - **Payment register pays only receivable/payable lines**: `account.payment._get_valid_payment_account_types()`
   returns `asset_receivable`, `liability_payable` ([account_payment.py:247](../../../../addons/account/models/account_payment.py#L247)).
-  `l10n_ge`'s 310310 Salaries Payable is `liability_current` and 332010 Pension is not reconcilable, so
-  payroll NET and pension legs on them cannot be paid through the register as shipped.
+  With context `hr_payroll_payment_register`, `hr_payroll_account` adds `liability_current`
+  ([account_payment.py:11](../../../../enterprise/hr_payroll_account/models/account_payment.py#L11)), so a salary
+  NET on `l10n_ge`'s 310310 (Current Liabilities, reconcilable) is payable; a partnered authority leg without
+  that context is not, and 332010 Pension is not reconcilable as shipped.
+- **`hr.payslip.action_register_payment` is gone** from `hr_payroll_account` (v19 had it at
+  `models/hr_payslip.py:277`). A `super().action_register_payment()` override raises AttributeError.
+- **`hr.work.entry.type.is_leave` is gone**, replaced by `count_as` (Selection `working_time` / `absence`,
+  [hr_work_entry_type.py:36](../../../../addons/hr_work_entry/models/hr_work_entry_type.py#L36)). Data files
+  setting `is_leave` stop the module install.
+- **Chart reload never changes `reconcile` on an existing account**
+  ([chart_template.py:452](../../../../addons/account/models/chart_template.py#L452), "Prevents overriding user
+  setting"). An extension module's `reconcile` override reaches only companies that load the chart after it is
+  installed; a type change to Payable still forces `reconcile=True` through the compute.
+- **`l10n_ge` sales taxes as shipped (checked on a clean DB, 2026-09-23)**: under "Georgia (VAT Registered)"
+  the fiscal position replaces `18%` by all six taxes whose `original_tax_ids` is `ge_vat_sale_18`
+  (`18% S`, `18% AD`, `18% O`, `0% EXT F/L/O`) — a 100 invoice totals 154; under "Georgia (non-VAT
+  Registered)" `18%` is removed (it is only valid for the VAT fiscal position,
+  [partner.py:161](../../../../addons/account/models/partner.py#L161)) — no VAT on B2C invoices.
 
 ---
 
