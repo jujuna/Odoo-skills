@@ -542,10 +542,18 @@ Found while porting `geo_payroll` and its 352 tests (2026-09-23):
 | `resource.calendar.tz` | gone; `res.company.tz` and a required `hr.version.tz` | `calendar.tz = ...` raises AttributeError |
 | New structure: no rules | `rule_ids` defaults to copies of `hr_payroll.default_structure` rules | pass `rule_ids` explicitly in data (`eval="[]"`) to get none |
 | Draft run opens its payslips | `action_open_payslips()` calls `_generate_payslips()` every time a draft run is opened (`hr_payslip_run.py:409`) | an override must not raise when nothing new is left to generate |
+| New structure's journal = default structure's journal (often empty) | `hr.payroll.structure.create()` sets the salary journal for **every** company ([hr_payroll_account/models/hr_payroll_structure.py:27](../../../../enterprise/hr_payroll_account/models/hr_payroll_structure.py#L27)) | an account configurator that treats "journal already set" as "an accountant configured this company" skips every company, and payslips post journal entries with no lines |
 
 `account.payment.register` refuses lines of more than one `account_type` in one wizard, with the
 misleading message "both inbound and outbound moves" (`account_payment_register.py:1049`; same in v19).
 Salary NET, pension and any tax account paid together must share one type (Payable).
+
+**Payroll access levels** (found in `gec_payroll_bank`, 2026-09-23): v19 had two levels,
+`group_hr_payroll_user` "Officer: Manage all contracts" and Administrator. v20 has three
+([security/hr_payroll_security.xml:10](../../../../enterprise/hr_payroll/security/hr_payroll_security.xml#L10)):
+`group_hr_payroll_user` is now **Assistant**, the new `group_hr_payroll_officer` is Officer, and
+Administrator implies Officer plus `hr.group_hr_manager` (:30). A custom group that implies
+`group_hr_payroll_user` "for Officer rights" now grants Assistant only.
 
 ---
 
