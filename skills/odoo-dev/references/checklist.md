@@ -60,13 +60,21 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] `create()` overrides use `@api.model_create_multi` and call `super()` once
 - [ ] `write()` / `unlink()` overrides validate in batch, one `super()` call
 - [ ] No removed APIs: `check_access_rights`, `_check_recursion`, `toggle_active`,
-      `tools.ormcache`, `registry.clear_cache`, `tools.Query`, `name_get`, `type='json'`
+      `tools.ormcache`, `registry.clear_cache`, `tools.Query`, `name_get`, `type='json'`,
+      `get_param`/`set_param` (typed `get_str`/`get_bool`/`set_*`, not exact renames:
+      `v20-changes.md` §2), `SELF_WRITEABLE_FIELDS`
+      (`user_writeable=True`) — these fail at run time, not at install
 - [ ] `read_group()` / `_read_group()` use the v20 signature
 - [ ] No N+1 queries in compute or business methods
 - [ ] Computes assign every record and never write to other models
 - [ ] Dynamic domains use `odoo.fields.Domain`
 - [ ] x2many updates use `odoo.Command`
 - [ ] User-facing text uses `self.env._()` with `%s`; no f-strings inside it
+- [ ] Module-level helpers take `env` and call `env._()`; module-level constants use `_lt`
+- [ ] `@api.constrains` methods raise `ValidationError`, not `UserError`
+- [ ] A chatter/log entry written just before a `raise` uses its own cursor when it must
+      survive the rollback (`transactions.md` section 9)
+- [ ] Row locks use `lock_for_update()`; catch `LockError` when the user needs a specific message
 - [ ] `_logger` uses lazy `%s` formatting
 - [ ] Raw SQL parameterized; cache invalidated after SQL writes; `modified()` called
 - [ ] Float comparisons use `float_compare` / `float_is_zero`
@@ -74,6 +82,16 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] No mutable default arguments
 - [ ] Constraints and indexes are `models.Constraint(...)` / `models.Index(...)`
 - [ ] `cr.commit()` only in resumable cron/import code, with a test guard
+
+## Cron (`cron.md`)
+
+- [ ] Cron XML has no `numbercall` / `doall` (removed; install fails) and sets `user_id`
+- [ ] The job does not depend on its Scheduler User being superuser; `sudo()` and company
+      filtering are explicit
+- [ ] Work done with a user's own credentials or language runs under `with_user(user)`
+- [ ] A cron that notifies (activity, message, mail) stores a marker such as
+      `..._escalated_at`, so the next run does not repeat it
+- [ ] Cron method names stay stable (`code` sits in a `noupdate` record in the database)
 
 ## Fields
 
@@ -119,6 +137,14 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] `noupdate="1"` on records the user is expected to edit
 - [ ] Module icon at `static/description/icon.png`
 - [ ] `depends` is the smallest set that works
+
+## Refactor / quality review (`refactor.md`)
+
+- [ ] Findings sorted into behavior change vs cleanup; only cleanup goes into the refactor
+- [ ] `code_inventory.py compare`: no translatable text removed or added unless intended
+- [ ] No public name renamed; nothing deleted before `dead_names.py` and its DB check
+- [ ] External requests recorded old vs new and identical (`oldnew.Recorder`)
+- [ ] Intended differences listed in the report; deploy note and `git add -A` hint given
 
 ## Tests
 

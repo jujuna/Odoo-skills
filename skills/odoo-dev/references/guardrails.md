@@ -41,9 +41,15 @@ Full 19 → 20 delta with source links: `v20-changes.md`.
 | `group_operator='sum'` | `aggregator='sum'` |
 | `auto_join=True` | `bypass_search_access=True` or `any` / `not any` domains |
 | `self._cr` / `self._uid` / `self._context` | `self.env.cr` / `.uid` / `.context` |
+| `ir.config_parameter` `get_param()` / `set_param()` | `get_str/get_bool/get_int/get_float(key, default)`, `set_str/set_bool/...(key, value)` |
+| `res.users` `SELF_READABLE_FIELDS` / `SELF_WRITEABLE_FIELDS` | `user_writeable=True` on the field; secrets on `res.users` need `groups=` |
 | `t-esc` (QWeb + OWL) | `t-out` |
 | `useState()` / `reactive()` (OWL) | `proxy()` from `@odoo/owl` |
 | `<t t-set>` before `<t t-call>` | parameters as `t-call` attributes (`x="expr"`, `x.f="text"`) |
+| payment `state == 'in_process'` / `== 'paid'` | `'paid'` (posted) / `'reconciled'` (matched): rename paid → reconciled first |
+| `res.bank`, `bank_id.bic`, `journal.bank_id` | `res.partner.bank.bank_bic` / `bank_name`, `journal.bank_bic` |
+| `acc_number`, `sanitized_acc_number`, `journal.bank_acc_number` | `account_number`, `sanitized_account_number`, `journal.bank_account_number` |
+| `def __get_bank_statements_available_sources` | `def _get_bank_statements_available_sources` |
 
 **`read_group()` is NOT deprecated in v20.** It is the public, `@api.model`, RPC-safe
 wrapper with the modern signature. Backend code still calls `_read_group()`; the web layer
@@ -237,5 +243,8 @@ check_access_rights()/_rule()        → check_access() / has_access()
 _check_recursion()                   → _has_cycle()  (boolean inverted)
 toggle_active()                      → action_archive() / action_unarchive()
 self._cr / self._uid / self._context → self.env.cr / .uid / .context
+ir.config_parameter.get_param()      → get_str() / get_bool() / get_int() / get_float()
+ir.config_parameter.set_param()      → set_str() / set_bool() / set_int() / set_float()
+SELF_WRITEABLE_FIELDS (res.users)    → user_writeable=True on the field
 SELECT ... FOR UPDATE (raw)          → lock_for_update() / try_lock_for_update()
 ```

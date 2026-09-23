@@ -330,7 +330,7 @@ Use `hmac.compare_digest` for every secret comparison — `==` leaks timing.
 # ship it empty, let the admin fill it
 <field name="value"></field>
 
-api_key = self.env['ir.config_parameter'].sudo().get_param('my_module.api_key')
+api_key = self.env['ir.config_parameter'].sudo().get_str('my_module.api_key')
 if not api_key:
     raise UserError(self.env._("API key not configured (Settings > Technical > Parameters)."))
 ```

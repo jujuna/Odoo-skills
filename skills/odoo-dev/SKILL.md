@@ -6,8 +6,9 @@ description: >
   ir.access/security, multi-company, cron, QWeb, OWL 3, ORM/SQL, integrations). Trigger on
   Odoo-specific terms like __manifest__.py, ir.access, ir.model.access, record rules, model/view
   inheritance, jsonrpc/JSON-2 API, compute_sql, performance, security, multi-company, and
-  customization requests. Also triggers for Odoo business module learning, documentation requests,
-  and "how does X work in Odoo".
+  customization requests. Also triggers for code quality reviews and "make my code better /
+  shorter / cleaner without changing logic", Odoo business module learning, documentation
+  requests, and "how does X work in Odoo".
 ---
 
 # Odoo 20 Development Skill
@@ -100,7 +101,11 @@ Load **only** the file(s) the current task needs.
 | XML/CSV data files, noupdate, manifest order | `references/data-files.md` |
 | Unit/integration tests, Form simulation | `references/testing.md` |
 | Business module learning / documentation | `references/doc-template.md` |
+| Code quality review, "make it better / shorter / organized", refactor without behavior change | `references/refactor.md` |
 | Pre-output quality check | `references/checklist.md` |
+
+Proof scripts for refactors (inventory, dead code, split check, old-vs-new harness, import
+check) live in `scripts/`; `references/refactor.md` section 9 says which proves what.
 
 **Auto-load rules**
 - Any code change → `simplicity.md` + `dependencies.md`
@@ -111,14 +116,17 @@ Load **only** the file(s) the current task needs.
 - Non-trivial ORM code → `orm.md`; performance-sensitive → `+ performance.md`
 - Frontend → `owl.md`
 - Tests (after the user says yes) → `testing.md`
+- Quality review or refactor of existing code → `refactor.md` + `dependencies.md`
 
 ---
 
 ## Execution Workflow
 
-1. **Classify:** `build` | `fix` | `review` | `security` | `performance` | `migration` |
-   `frontend` | `learn/document`
+1. **Classify:** `build` | `fix` | `review` | `refactor` | `security` | `performance` |
+   `migration` | `frontend` | `learn/document`
 2. **`learn/document`** → Documentation Workflow below
+   **`review` / `refactor`** → `refactor.md`: measure first, plan per phase, the user approves
+   each phase and commits it; bugs found are listed, never fixed inside the refactor
 3. **Code tasks** → load `simplicity.md` + `dependencies.md` + the matching area file(s)
 4. **Sweep** — find callers, overrides, inheriting views, and the core precedent. State the
    result in the answer.
@@ -176,6 +184,7 @@ discusses business logic.
 | Single-file change | Complete file or exact patch |
 | Full module | All files with `security/ir.access.csv` + manifest + views |
 | Review/fix | Issues list first, then corrected code |
-| Refactor | Behavior-stable unless the user asked for a change |
+| Quality review | Findings ranked, each tagged behavior change yes/no (`refactor.md` section 2) |
+| Refactor | Plan table before any edit; per phase: changes, proof output, intended differences, deploy note (`refactor.md` sections 7-8) |
 
 Always include the file path + method/class target for code placement.

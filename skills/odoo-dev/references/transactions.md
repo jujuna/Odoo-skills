@@ -242,6 +242,25 @@ for tx in transactions:
 - Catch database operational errors separately from business errors.
 - A rollback also discards all uncommitted work from other code using the same cursor.
 
+### Log, then raise — the log is rolled back too
+
+`message_post()`, a log-model `create()` or any write made just before `raise UserError(...)`
+disappears with the transaction. When the failure itself must stay visible (an external
+system refused a document), write the trace in its own cursor, then raise. Core precedent,
+shortened ([l10n_my_edi/models/myinvois_document.py:426](../../../../addons/l10n_my_edi/models/myinvois_document.py#L426)):
+
+```python
+with self.env.registry.cursor() as log_cr:
+    log_env = self.env(cr=log_cr, user=SUPERUSER_ID)
+    log_env['account.move'].browse(invoice_bodies)._message_log_batch(bodies=invoice_bodies)
+raise UserError(error_message)
+```
+
+The separate cursor commits when the `with` block ends without error
+([odoo/sql_db.py:331](../../../../odoo/sql_db.py#L331)). Only insert new rows there (messages,
+log lines): updating a row the main transaction already changed waits on that transaction's
+own lock and hangs the request.
+
 ---
 
 ## 10. Row Locking for Concurrency

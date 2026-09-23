@@ -296,7 +296,7 @@ def webhook(self, **post):
     """
     import hmac
     secret = post.get('secret', '')
-    expected = request.env['ir.config_parameter'].sudo().get_param('my_module.webhook_secret', '')
+    expected = request.env['ir.config_parameter'].sudo().get_str('my_module.webhook_secret')
     if not hmac.compare_digest(secret, expected):
         raise Forbidden()
     ...

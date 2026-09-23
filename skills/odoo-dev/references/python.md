@@ -250,8 +250,18 @@ msg = self.env._("Order {} cannot be deleted.".format(self.name))
 ```
 
 `self.env._()` is the preferred form in v19+ and is what new core code uses. The imported
-`from odoo import _` still works and is fine in module-level constants or where no `env` is
-in scope; do not mix the two styles inside one file.
+`from odoo import _` reads the language from the caller's `context` / `kwargs` / `self.env`
+locals (`odoo/tools/translate.py` `_get_lang`); do not mix the two styles inside one file.
+
+| Where the text is | Use | Why |
+|---|---|---|
+| method with `self` | `self.env._("...")` | env language, no import |
+| module-level helper (no `self`) | pass `env`, call `env._("...")` | bare `_()` there uses the HTTP request's language when there is one; in a cron it logs a warning and returns English |
+| module-level constant | `_lt = LazyTranslate(__name__)`, `LABEL = _lt("...")`, later `env._(LABEL)` | translated when used, not at import (`translate.py:1213`; core: `auth_signup/models/res_users.py:18`) |
+
+Code translations are looked up by (addon of the calling file, exact source text)
+(`translate.py:2599`): moving a text inside one addon keeps its translation; rewording it,
+or moving it into another addon, loses it until that addon's `.po` has it.
 
 ### String building for large outputs:
 ```python
@@ -1304,8 +1314,7 @@ class ResCompany(models.Model):
     @api.ormcache('self.env.company.id', 'feature_code')
     def _get_feature_setting(self, feature_code):
         """Return a cached primitive — never a recordset."""
-        param = self.env['ir.config_parameter'].sudo().get_param(f'mymod.{feature_code}')
-        return param or False
+        return self.env['ir.config_parameter'].sudo().get_str(f'mymod.{feature_code}') or False
 ```
 
 ### Why not `lru_cache`

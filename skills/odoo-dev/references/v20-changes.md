@@ -78,7 +78,23 @@ and `ir.access.csv` is the last entry.
 | OWL 2 `useState` / `reactive` | OWL 3 `proxy` |
 | QWeb `t-esc` / `t-raw` (server side too) | `t-out`. v19 had `_compile_directive_esc`; v20 does not. The engine only logs "Unknown directives or unused attributes" and renders **nothing** — reports and wizard HTML come out blank, no error ([ir_qweb.py:1929](../../../../odoo/addons/base/models/ir_qweb.py#L1929)) |
 | `_sql_constraints` | `models.Constraint(...)`. v20 logs "no longer supported" and creates **no** constraint — uniqueness is silently unenforced |
+| `ir.config_parameter.get_param(key, default)` / `set_param(key, value)` | typed `get_str` / `get_bool` / `get_int` / `get_float(key, default)` and `set_str` / `set_bool` / `set_int` / `set_float(key, value)` — commit `a4f2879697a`, [ir_config_parameter.py:65-129](../../../../odoo/addons/base/models/ir_config_parameter.py#L65). The module still installs; the cron or button that reads the key dies with `AttributeError` at run time. `set_bool(key, False)` stores `'False'` (v19 `set_param(key, False)` deleted the row); only `None` means undefined. A settings `Boolean` with `config_parameter=` and `default=True` shows ON while the key is missing ([res_config.py:264](../../../../odoo/addons/base/models/res_config.py#L264)) — code reading the key must use the same default, or drop the field default |
+| `res.users.SELF_READABLE_FIELDS` / `SELF_WRITEABLE_FIELDS` | field parameter `user_writeable=True` — commit `a816d151ae1`, [res_users.py:189](../../../../odoo/addons/base/models/res_users.py#L189), [:638](../../../../odoo/addons/base/models/res_users.py#L638). Overriding the old properties is silently ignored: the user can no longer save that field on their own record (only `base.group_erp_manager` can). Reads follow record rules, and every internal user reads every user ([base ir.access.csv:70](../../../../odoo/addons/base/security/ir.access.csv#L70)), so a secret stored on `res.users` needs `groups=` |
 | Font Awesome (`fa fa-x`, `icon="fa-x"`) | Material Symbols — see §10 and `views.md` |
+
+**Porting `get_param` reads.** Pick the getter by how the value is used. The typed getters
+are not exact renames:
+
+| v19 read | v20 | Trap |
+|---|---|---|
+| `get_param(key, 'B')` | `get_str(key, 'B')` | v19 returned `raw or default`, so a stored `''` gave the default. `get_str` returns `''`; only a missing row or a NULL value gives the default ([ir_config_parameter.py:124](../../../../odoo/addons/base/models/ir_config_parameter.py#L124)) |
+| `get_param(key) == 'True'` | `get_bool(key, False)` | parsed by `str2bool`, so `'1'`, `'true'`, `'yes'`, `'on'` now read True ([misc.py:456](../../../../odoo/tools/misc.py#L456)) |
+| `float(get_param(key))` inside `try/except ValueError` | `get_float(key, default)` | a non-numeric value already returns the default and logs a WARNING ([ir_config_parameter.py:149](../../../../odoo/addons/base/models/ir_config_parameter.py#L149)). Drop the wrapper |
+
+A `res.config.settings` `get_values()` override that re-reads a `config_parameter=` field is
+dead code in v20: core `default_get` already reads every such field with the typed getter and
+the field default ([res_config.py:263-286](../../../../odoo/addons/base/models/res_config.py#L263)).
+Delete the override instead of porting it.
 
 `odoo.tools` only re-exports `SQL` and `drop_view_if_exists` from `tools.sql` now;
 `from odoo.tools import *` no longer pulls in the whole SQL helper set —
@@ -315,7 +331,82 @@ New core primitives: `computed`, `signal`, `t`, `useProps`, `useOnChange`, plugi
 
 ---
 
-## 11. Unchanged — do not "fix" these
+## 11. Accounting: payments, bank accounts, statements
+
+Found while porting `basis_bank` (2026-09-23). Each one breaks v19 code at import, at registry
+setup or silently at run time.
+
+**`account.payment.state` lost `in_process`** — v20 selection is `draft, paid, reconciled,
+canceled, rejected` ([account_payment.py:37](../../../../addons/account/models/account_payment.py#L37)).
+
+| v19 | v20 | Meaning |
+|---|---|---|
+| `in_process` | `paid` | posted, waiting for the bank statement |
+| `paid` | `reconciled` | matched with the statement (or all its bills paid) |
+
+- Writing `'in_process'` raises `ValueError: Wrong value` ([fields_selection.py:231](../../../../odoo/orm/fields_selection.py#L231)).
+  A search on it silently matches nothing.
+- Rename in two steps: `'paid'` → `'reconciled'` first, then `'in_process'` → `'paid'`. A blind
+  `in_process` → `paid` replace turns every old `state == 'paid'` check into "any posted payment".
+- `action_post()` sets `paid` for every payment. v19 sent `asset_cash` outstanding accounts straight to paid.
+- `action_validate()` now means paid → `reconciled`. It raises for `asset_cash` outstanding
+  accounts and for any state other than `paid` ([account_payment.py:1221](../../../../addons/account/models/account_payment.py#L1221)).
+- `_valid_payment_states()` moved from `account.batch.payment` to `account.payment` and now returns
+  `['paid', 'reconciled']` or `['paid']` ([account_payment.py:290](../../../../addons/account/models/account_payment.py#L290)).
+- Journal items and the move use `commercial_partner_id`, not `partner_id`. Recipient bank
+  accounts come from `commercial_partner_id.bank_ids`.
+
+**`account.move.line.amount_residual` is computed on every line**, not only on reconcilable and
+cash accounts ([account_move_line.py:1210](../../../../addons/account/models/account_move_line.py#L1210)).
+A payment whose outstanding account is not reconcilable keeps a non-zero liquidity residual and stays `paid`.
+
+**`res.bank` is deleted** — commit `113d77eb35aa` "[IMP] *: Improve UX of bank accounts".
+
+| v19 | v20 |
+|---|---|
+| `res.bank` model, `res.partner.bank.bank_id` | gone. `bank_name`, `bank_bic` (free Char, uppercased on save) and the address live on `res.partner.bank` ([res_partner_bank.py:59](../../../../odoo/addons/base/models/res_partner_bank.py#L59)) |
+| `acc_number` / `sanitized_acc_number` / `acc_holder_name` | `account_number` / `sanitized_account_number` / `holder_name` |
+| `account.journal.bank_id` / `bank_acc_number` | `bank_bic` / `bank_name` / `bank_account_number`, related to `bank_account_id` ([account_journal.py:249](../../../../addons/account/models/account_journal.py#L249)) |
+| `from odoo.addons.base.models.res_bank import sanitize_account_number` | `...base.models.res_partner_bank import ...` — the old path fails at import |
+
+`@api.depends('bank_id.bic')` on a journal fails registry setup with "Wrong @depends"
+([fields.py:949](../../../../odoo/orm/fields.py#L949)). A typed BIC can be 8 or 11 characters
+(`CBASGE22` or `CBASGE22XXX`), so compare `bank_bic[:8]`.
+
+**Bank feeds**: the name-mangled `__get_bank_statements_available_sources` is gone. Override
+`_get_bank_statements_available_sources` ([account_journal.py:57](../../../../addons/account/models/account_journal.py#L57)).
+A leftover `__` override is never called: the option disappears from the dropdown, but writing
+its value still works, because a method-based selection is not validated on write
+([fields_selection.py:231](../../../../odoo/orm/fields_selection.py#L231) skips the check when
+`_selection` is `None`). A static-list selection such as `account.payment.state` does raise.
+
+**`_create_bank_statements()` returns three values**: `(statement_ids, ignored_duplicates,
+ignored_zero_amount)`. Zero-amount lines are now skipped
+([account_bank_statement_import/models/account_journal.py:282](../../../../enterprise/account_bank_statement_import/models/account_journal.py#L282)).
+Unpacking two values raises after the statements were already created.
+
+**Reconcile a statement line from code** the way the bank widget does:
+`st_line.set_line_bank_statement_line(aml_ids)`
+([account_accountant/models/account_bank_statement.py:1720](../../../../enterprise/account_accountant/models/account_bank_statement.py#L1720)).
+It skips lines that are already reconciled. Bank-API precedent for payment states:
+`account_online_payment` maps bank pending/accepted to `paid` and leaves `reconciled` to
+statement matching (`ONLINE_STATUS_TO_STATE`).
+
+Also proven while installing the gec modules on a test database (2026-09-23):
+
+- **`account.group` is deleted** — commit `c3313b336b9f` "[IMP] account: Replace account groups
+  with account parent". `_inherit = 'account.group'` stops the registry with "Model
+  'account.group' does not exist in registry".
+- **OdooBot cannot trust bank accounts**: `res.partner.bank._user_can_trust()` refuses uid 1
+  outside install or test mode ([res_partner_bank.py:317](../../../../addons/account/models/res_partner_bank.py#L317)),
+  so crons and `odoo-bin shell` scripts must use a real user (`with_user(...)`) to set
+  `allow_out_payment`.
+- Payroll: `hr.salary.rule.category_id` no longer exists and the xmlid
+  `hr_payroll.hr_payslip_run_view_kanban` is gone (replacements not checked yet).
+
+---
+
+## 12. Unchanged — do not "fix" these
 
 Still correct in v20, despite churn elsewhere:
 

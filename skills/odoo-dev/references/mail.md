@@ -115,6 +115,12 @@ When a tracked field changes, Odoo creates a `mail.tracking.value` record and po
 `message_post()` is singleton-only. Loop explicitly when posting the same audit
 entry on multiple records.
 
+- A plain `str` body is HTML-escaped ([mail_thread.py:2399](../../../../addons/mail/models/mail_thread.py#L2399):
+  "escape if text, keep if markup"), so tags show as text. Build HTML with `Markup` and pass
+  values through `%` so they are escaped: `Markup("<b>%s</b>") % value`.
+- A message posted and then followed by `raise` is rolled back with the transaction: the
+  chatter never shows it. To keep a trace of a failure, see `transactions.md` section 9.
+
 ### Post a note (internal, no notification)
 
 ```python

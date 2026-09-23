@@ -146,6 +146,7 @@ Domain('invoice_ids', 'not any', [('payment_state', '=', 'not_paid')])
 - `any` on a many2one / `id` matches when the target satisfies the sub-domain (searched with `active_test=False`); on an x2many it searches the comodel with the field's context, applying the comodel's record rules.
 - `any!` / `not any!` behave like `any` but **bypass the comodel's record rules** — security-sensitive, internal use only.
 - Canonical operators are `in` / `not in` (the optimizer rewrites `=` / `!=` into them) plus `like`/`ilike`/`=like`/`=ilike` and their negations. In `in` values, `False` means "not set".
+- `('f', 'not in', vals)` also matches records where `f` is empty (`NOT IN ... OR f IS NULL`, [odoo/orm/fields.py:1474](../../../../odoo/orm/fields.py#L1474)). Add `('f', '!=', False)` when empty must not match.
 
 **Rules:**
 - Start from `Domain.TRUE` / `Domain.FALSE` when conditionally composing.

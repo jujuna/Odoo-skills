@@ -83,6 +83,8 @@ Key compute attributes (`fields.py`):
 - `compute='_method'` — implies `store=False` and `copy=False` unless overridden.
 - `store=True` — persist; needed for search/group/list on the field.
 - `compute_sudo` — recompute as superuser (default `True` for stored, `False` for non-stored).
+  So a non-stored compute that searches or reads another model runs with the user's rights:
+  a user without read access on that model gets an AccessError when the form loads.
 - `precompute=True` — compute *before* the INSERT instead of at flush. A provided default value or explicit value disables it. Good for `One2many` lines created in batch; counterproductive when records are created one-by-one (loses prefetch batching).
 - `recursive=True` — **required** when the field depends on itself through a relation (`parent_id.x`). Must be explicit or recomputation is wrong.
 - `inverse='_method'` — makes a non-stored/computed field writable; the inverse persists the assignment.
@@ -313,6 +315,10 @@ def _onchange_partner_id(self):
 - Do **not** call `create`/`read`/`write`/`unlink` on the pseudo-record — assign fields or use `update()`.
 - A `One2many`/`Many2many` field cannot modify itself via onchange (webclient limitation).
 - Return `{'warning': {...}}` to surface a dialog/notification.
+- A value assigned to a field that is **not in the form view** is not sent back and not
+  saved, and its own onchanges do not cascade: `onchange()` diffs and cascades over
+  `fields_spec` only ([web/models/models.py:2381-2391](../../../../addons/web/models/models.py#L2381)).
+  Put the field in the view (`invisible="1"`) or make it a compute.
 
 ---
 
