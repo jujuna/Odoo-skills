@@ -311,6 +311,59 @@ plugin-based; otherwise a service is still the right unit.
 - glob the directory; do not list files one by one unless order matters
 - `('replace', old, new)`, `('remove', path)`, `('before', ref, path)` for surgical edits
 
+### Dark mode
+
+`web.assets_web_dark` is `('include', 'web.assets_web')` plus every `*.dark.scss`
+([web manifest](../../../../addons/web/__manifest__.py)); `web_enterprise` loads the dark
+values of the primary variables first, so **every backend SCSS file is compiled twice**.
+A hard-coded `#fff` card or `#333` text stays light in dark mode, and light text lands on
+a light box (the RS e-invoice tab was unreadable for exactly this reason).
+
+- Neutrals come from Odoo variables, never hex: `$o-view-background-color` (card/surface),
+  `$o-gray-100` (inset boxes, table header/footer, toolbars), `$o-gray-300` (borders),
+  `$o-gray-400` (input borders), `$o-main-text-color`, `$o-gray-600` (muted text). Their
+  light values equal the usual Bootstrap greys, so the light theme does not move.
+- Tints that must work on both backgrounds: `rgba($o-info, 0.08)` for hover, Bootstrap
+  `text-bg-*` / `alert-*` classes for badges and banners.
+- Colours of your own that need a different shade on dark (dark-toned text such as
+  `#92400e`, pale backgrounds such as `#fef3c7`, brand text such as `#2563eb`) get both
+  values in the token block, with the switch core uses in
+  [mass_mailing.scss:220](../../../../addons/mass_mailing/static/src/scss/mass_mailing.scss#L220):
+
+```scss
+$my-dark: $o-webclient-color-scheme == dark;      // 'bright' in light, 'dark' in dark
+$my-primary:      #2563eb;                         // fill: white text on it reads on both
+$my-primary-text: if($my-dark, #60a5fa, #2563eb);  // text/icon/border on the page
+$my-soft:         if($my-dark, mix(#2563eb, $o-view-background-color, 18%), #eaf1fe);
+```
+
+  The light value stays the original hex, so the light theme cannot move. Keep a
+  separate token for fills and for text: a mid-tone fill is fine on both themes, the
+  same colour as text on a dark background is not. Tints: `mix(<colour>, $o-view-background-color, 10–45%)`.
+- `*.dark.scss` in `web.assets_web_dark` (core `account`, `web_enterprise`) is for
+  overriding selectors you do not own. For your own stylesheet, one token block is
+  easier to keep correct than a parallel file of selectors.
+- `var(--o-component-background)`, `var(--o-text-color)`, `var(--o-border-color)`,
+  `var(--o-text-color-muted)`, `var(--o-brand-primary)`, `var(--o-view-background-color)`,
+  `var(--o-main-text-color)` do **not exist** in v20 (`--o-input-background-color` is only
+  set locally, to `transparent`, in two core views) — a `var(--x, #fff)` always renders its
+  light fallback.
+- Components that route colours through their own CSS custom properties get both values
+  by interpolation, so only the property block changes:
+  `--grid-surface: #{if($my-dark, $o-view-background-color, #fff)};`
+- A module that is not installed can still be checked: compile its SCSS with `sass`
+  (libsass, in the venv) after a prelude that sets the light, then the dark, values of the
+  `$o-*` variables it uses, and compare the resolved colours.
+- `$o-gray-200` equals the view background in dark mode — for a light border use
+  `mix($o-gray-200, $o-gray-300)` (light `#e3e7ea`, dark `#35373e`) or `$o-gray-300`.
+- HTML that is also sent by email (`body_html`, `message_post` bodies) keeps its inline
+  light styles; make sure every text node in it sets its own `color`, so it reads as a
+  light card in the dark chatter, as core emails do.
+- Verify: before editing, compile `web.assets_web` and `web.assets_web_dark`
+  (`env['ir.qweb']._get_asset_bundle(name).css()`), keep your module's rules; after editing,
+  the light set must be identical and the dark set must have no light background or
+  near-black text left.
+
 ---
 
 ## 9. Common patterns

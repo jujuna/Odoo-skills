@@ -102,6 +102,9 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] Icons: Material Symbols names that exist in `addons/web/icons.py`; no `fa-*`;
       every `<i data-icon>` has a `title` or text
 - [ ] No inline styles — Bootstrap classes
+- [ ] SCSS: no hard-coded neutral colours — `$o-view-background-color`, `$o-gray-*`,
+      `$o-main-text-color`; own colours that need a dark shade hold both values via
+      `if($o-webclient-color-scheme == dark, dark, light)` (`owl.md` → Dark mode)
 
 ## Mail / tracking
 
