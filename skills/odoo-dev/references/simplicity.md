@@ -112,8 +112,9 @@ Organized does not mean layered.
 - One method, one job; short enough to read without scrolling
 - Group by concern in the standard layout: `models/`, `views/`, `security/`, `wizard/`
 - No dead code, no commented-out code, no unused imports, no leftover helper
-- Comments only where a name cannot carry the meaning; no comment that restates the code
-- One-line docstring, and only when the method name is not enough
+- Explanations go in the method docstring (what it does and why, 1–4 lines), not in
+  inline comments; skip it only for a trivial one-liner whose name says everything
+- Inline comments only for a genuinely non-obvious line; never one that restates the code
 
 ## 9. Never do these
 

@@ -772,29 +772,58 @@ _logger = logging.getLogger(__name__)
 
 ### Comments and docstrings
 
-Write self-explanatory code; lean on naming, not narration.
+Explain in the docstring, not in inline comments. A reader should learn what a method does
+and why from its docstring alone; the body should read without narration.
 
 ```python
-# GOOD — one-line docstring states intent; no comment restating the code
+# GOOD — the docstring carries the intent and the non-obvious rule; the body has no comments
 def _prepare_invoice_values(self):
-    """Build account.move values for this order."""
-    self.ensure_one()
-    return {'partner_id': self.partner_id.id, 'move_type': 'out_invoice'}
+    """Build the account.move values for this order.
 
-# AVOID — multi-paragraph docstring for a trivial method, comments narrating obvious code
+    Uses the order's fiscal position, not the partner's current one, so a partner change
+    after confirmation does not re-tax an already agreed price.
+    """
+    self.ensure_one()
+    return {
+        'partner_id': self.partner_id.id,
+        'move_type': 'out_invoice',
+        'fiscal_position_id': self.fiscal_position_id.id,
+    }
+
+# AVOID — inline comments narrating the code, the real reason nowhere
+def _prepare_invoice_values(self):
+    self.ensure_one()  # make sure it is a single record
+    # build the values
+    return {'partner_id': self.partner_id.id}  # return the dict
+
+# AVOID — an essay: restates the name, walks through the body line by line
 def _prepare_invoice_values(self):
     """
-    This method prepares and returns the dictionary of values that will
-    later be used to create the customer invoice for the current order...
+    This method prepares and returns the dictionary of values that will later be used
+    to create the customer invoice for the current order. First it checks that...
     """
-    self.ensure_one()                       # make sure it is a single record
-    return {'partner_id': self.partner_id.id}  # return the values dict
+```
+
+JS follows the same rule with a short `/** ... */` block above the method:
+
+```js
+/**
+ * Make the clicked KPI card's state filter the only active one.
+ * Clicking the already active card, or Total, clears them all.
+ */
+onKpiClick(key) {
 ```
 
 **Rules:**
-- Docstrings: one short line stating what the method does. Expand only for non-obvious behavior (transaction/security/performance choices, surprising side effects).
-- Comments: only when naming cannot make the code self-explanatory. Keep them short and explain *why*, not *what*.
-- Do not narrate obvious code or restate the method name in prose.
+- Every method you write or substantially change gets a docstring: a summary line, then
+  the *why* only when there is one — business rule, edge case, side effect a caller must
+  know. Usually 1–4 lines. Never an essay, never a restatement of the method name.
+- Skip the docstring only for a trivial one-liner whose name says everything
+  (`action_draft`, a plain `_compute_x` sum).
+- Inline comments (`#`, `//`, `<!-- -->`) only when a single line is genuinely
+  non-obvious: a workaround, a framework gotcha, a security or transaction reason. One
+  short line, explaining *why*.
+- No commented-out code, no comments that restate the code, no banner comments.
 - Do not add docstrings, comments, or type annotations to code you did not change.
 
 ### Method shape
@@ -1135,7 +1164,7 @@ for line in lines:
 - Clear names over clever abbreviations.
 - Small methods with one responsibility.
 - Explicit data shapes: `*_by_id`, `*_by_company`, `*_vals_list`.
-- Comments only for non-obvious transaction/security/performance choices.
+- The why in the method docstring; inline comments only for a non-obvious line.
 
 ---
 

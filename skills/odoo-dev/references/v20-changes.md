@@ -76,7 +76,9 @@ and `ir.access.csv` is the last entry.
 | `uom.uom.rounding` | `env['decimal.precision'].precision_get('Product Unit')` |
 | `_read_group_fill_results` / `_read_group_fill_temporal` / `_read_group_format_result` | web layer only — [addons/web/models/models.py](../../../../addons/web/models/models.py) |
 | OWL 2 `useState` / `reactive` | OWL 3 `proxy` |
-| QWeb `t-esc` | `t-out` |
+| QWeb `t-esc` / `t-raw` (server side too) | `t-out`. v19 had `_compile_directive_esc`; v20 does not. The engine only logs "Unknown directives or unused attributes" and renders **nothing** — reports and wizard HTML come out blank, no error ([ir_qweb.py:1929](../../../../odoo/addons/base/models/ir_qweb.py#L1929)) |
+| `_sql_constraints` | `models.Constraint(...)`. v20 logs "no longer supported" and creates **no** constraint — uniqueness is silently unenforced |
+| Font Awesome (`fa fa-x`, `icon="fa-x"`) | Material Symbols — see §10 and `views.md` |
 
 `odoo.tools` only re-exports `SQL` and `drop_view_if_exists` from `tools.sql` now;
 `from odoo.tools import *` no longer pulls in the whole SQL helper set —
@@ -247,16 +249,29 @@ reactivity model, not a version bump. See `owl.md` for the working rules.
 | OWL 2 | OWL 3 |
 |---|---|
 | `useState(obj)` / `reactive(obj)` | `proxy(obj)` from `@odoo/owl` |
-| `useEffect` | `useLayoutEffect` from `@web/owl2/utils` |
-| `useEnv`, `useSubEnv`, `useChildSubEnv`, `useRef`, `useComponent`, `useExternalListener`, `onWillRender`, `onRendered` | same names, imported from `@web/owl2/utils` (compatibility layer) |
+| `useEffect(fn, deps)` | `useLayoutEffect(fn, () => deps)` from `@web/owl2/utils`. `@odoo/owl` still exports a `useEffect(fn)`, but it is a new one-argument reactive effect — a deps argument is silently ignored |
+| `useEnv`, `useSubEnv`, `onWillRender` | from `@web/owl2/utils` — its **only** exports are these three plus `render` and `useLayoutEffect` ([owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js)) |
+| `useRef("x")` + `t-ref="x"` + `ref.el` | `x = signal.ref()` + `t-ref="this.x"` + `this.x()` — `.el` is `undefined`, no error |
+| `useExternalListener(target, ev, fn)` | `useListener(target, ev, fn)` from `@odoo/owl` (351 core uses) |
+| `useComponent`, `useChildSubEnv`, `onRendered` | gone — no export anywhere, 0 imports in core |
 | `t-esc` | `t-out` |
 | `t-slot` | `t-call-slot` |
-| `t-portal` / `t-ref` / `t-model` | `t-custom-portal` / `t-custom-ref` / `t-custom-model` |
+| `t-portal` | `t-custom-portal` |
+| `t-ref`, `t-model` | directive names unchanged (core: `t-ref` 887, `t-custom-ref` 0; `t-model` 29) — only the `t-ref` value changed |
 | implicit `this` in templates | explicit `this.props.x`, `this.state.x` |
+
+Importing a name `@odoo/owl` no longer exports does not fail the bundle — the binding is
+`undefined` and the component throws when `setup()` calls it. Full export list and the
+migration procedure are in `owl.md`.
 
 New core primitives: `computed`, `signal`, `t`, `useProps`, `useOnChange`, plugins
 (`usePlugin`), scopes, resources. Counts in `addons/web/static/src`: `useState` 0,
 `proxy(` 146, `t-esc` 2, `@web/owl2/utils` imports 58.
+
+**v19 xpaths into core OWL templates stop matching.** Core templates now say
+`t-component="this.props.Renderer"`, `t-if="this.model.isReady()"`, so a v19 xpath such as
+`//t[@t-component='props.Renderer']` matches nothing and the view crashes with
+"cannot be located in element tree". Rewrite every xpath against the v20 attribute text.
 
 ---
 
@@ -278,6 +293,24 @@ New core primitives: `computed`, `signal`, `t`, `useProps`, `useOnChange`, plugi
 - **Tests**: new `MockHTTPClient` context manager in
   [odoo/tests/common.py](../../../../odoo/tests/common.py) for asserting outbound HTTP.
 - **`odoo.tools.safe_eval` is a package** (`evaluation`, `expression`, `runtime`).
+- **Font Awesome is removed — icons are Material Symbols** (commit `3e15a7be694`). Icons are
+  font ligatures: `<i class="oi" data-icon="check"/>`, not `class="fa fa-check"`. Button
+  `icon=` takes the Material Symbols name directly (`icon="search"`, `icon="refresh"`,
+  `icon="edit_square"`) — [view_button.js:24](../../../../addons/web/static/src/views/view_button/view_button.js#L24)
+  copies it into `data-icon` as-is. The temporary `fa-` mapping is gone, so a leftover
+  `icon="fa-search-plus"` renders as broken text (`-🔍-`). Brand/custom icons use the `oi_`
+  prefix (`data-icon="oi_github"`); `oi-filled`, `oi-fw`, `oi-lg`, `oi-spin` replace the
+  `fa-` utility classes — [icons.scss](../../../../addons/web/static/src/webclient/icons.scss).
+  Only names in the shipped font subset render — the list is `ICONS` in
+  [addons/web/icons.py](../../../../addons/web/icons.py). SCSS keyed on `.fa-x` must move to
+  `[data-icon="x"]`, and view validation warns when an `<i data-icon>` has no `title`,
+  `aria-label` or text. Mapping table and rules: `views.md` → Icons.
+- **Manifest `version` must start with `20.0.`** — [odoo/modules/module.py:500](../../../../odoo/modules/module.py#L500)
+  (`check_version`, [module.py:598](../../../../odoo/modules/module.py#L598)) logs "The module X has
+  an incompatible version, setting installable=False" and the module shows **uninstallable**
+  before any of its code is read. Short versions (`'1.0'`) are adapted to the running series
+  and are fine; a hard-coded `19.0.x.y.z` is not. Changing the series prefix is a migration
+  step, not a "version bump" — flag it and ask before editing.
 
 ---
 

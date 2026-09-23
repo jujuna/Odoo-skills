@@ -3,8 +3,9 @@
 Copy-paste templates for a new module. Delete every part the task does not need — an unused
 wizard, controller or demo file is a cost, not a courtesy.
 
-The code below follows the skill's own rules: one-line docstrings only where the name is not
-enough, multi-company by default, `self.env._()` for user text, `ir.access.csv` for security.
+The code below follows the skill's own rules: a short docstring (what + why) on every
+non-trivial method and no inline comments, multi-company by default, `self.env._()` for user
+text, `ir.access.csv` for security.
 
 ---
 
@@ -110,12 +111,14 @@ class MyModel(models.Model):
 
     @api.constrains('date')
     def _check_date(self):
+        """Refuse a past date while the record is a draft; confirmed records keep theirs."""
         for record in self.filtered(lambda r: r.state == 'draft'):
             if record.date < fields.Date.today():
                 raise ValidationError(self.env._("The date cannot be in the past."))
 
     @api.model_create_multi
     def create(self, vals_list):
+        """Number new records from their own company's sequence, never another company's."""
         for vals in vals_list:
             if vals.get('name', "New") == "New":
                 company_id = vals.get('company_id') or self.env.company.id
@@ -125,12 +128,18 @@ class MyModel(models.Model):
         return super().create(vals_list)
 
     def copy_data(self, default=None):
+        """Suffix duplicates with "(copy)" so they are not mistaken for the original."""
         vals_list = super().copy_data(default=default)
         for record, vals in zip(self, vals_list):
             vals['name'] = self.env._("%s (copy)", record.name)
         return vals_list
 
     def action_confirm(self):
+        """Confirm draft records, all or nothing.
+
+        One non-draft record blocks the whole batch, and the error names every offender
+        instead of confirming part of the selection.
+        """
         if invalid := self.filtered(lambda r: r.state != 'draft'):
             raise UserError(self.env._(
                 "Only draft records can be confirmed: %s", ", ".join(invalid.mapped('name'))
@@ -138,6 +147,7 @@ class MyModel(models.Model):
         self.state = 'confirmed'
 
     def action_done(self):
+        """Mark confirmed records as done, with the same all-or-nothing check."""
         if invalid := self.filtered(lambda r: r.state != 'confirmed'):
             raise UserError(self.env._(
                 "Only confirmed records can be done: %s", ", ".join(invalid.mapped('name'))
@@ -398,6 +408,10 @@ class MyModuleController(http.Controller):
 
     @http.route('/my_module/data', type='jsonrpc', auth='user', methods=['POST'])
     def get_data(self, record_id, **kwargs):
+        """Return a small record summary for the frontend.
+
+        Checks read access explicitly so a forbidden id fails before any field is read.
+        """
         if not isinstance(record_id, int) or record_id <= 0:
             raise ValueError("Invalid record id")
         record = request.env['my.module.model'].browse(record_id)

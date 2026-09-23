@@ -128,8 +128,9 @@ answer. No sweep → no change to existing behavior.
 - No `cr.commit()` in request / button / compute / constraint / onchange code
 - Imports at module top; a function-level import only to break a cycle or defer a heavy
   optional dependency (mark `# noqa: PLC0415`)
-- Minimal comments — explain *why*, never restate the code; never touch comments,
-  docstrings or type hints in code you did not change
+- Docstrings, not comments — every new or changed non-trivial method gets a short
+  docstring (what + why, 1–4 lines); inline `#` / `//` only for a genuinely non-obvious
+  line; never touch comments, docstrings or type hints in code you did not change
 
 ## 7. Fields
 
@@ -148,10 +149,15 @@ answer. No sweep → no change to existing behavior.
 
 - `<list>`, expression syntax, `name=` on `<page>` and `<filter>` for stable inheritance
 - `<chatter/>` when the model inherits `mail.thread`
-- `t-out`, never `t-esc`
+- `t-out`, never `t-esc` — server QWeb too: v20 renders an unknown `t-esc` as nothing
 - `t-call` parameters as attributes
-- OWL 3: `proxy` from `@odoo/owl`, legacy hooks from `@web/owl2/utils`, explicit `this.` in
-  templates
+- OWL 3: `proxy` from `@odoo/owl`; only `render`, `onWillRender`, `useLayoutEffect`,
+  `useEnv`, `useSubEnv` from `@web/owl2/utils`; refs are `signal.ref()` read as `this.x()`;
+  explicit `this.` in templates
+- xpaths into core OWL templates copy the **current** core attribute text
+  (`this.props.Renderer`, not `props.Renderer`) — `owl.md` §10
+- Icons are Material Symbols: `icon="open_in_new"`, `<i class="oi" data-icon="..." title="..."/>`;
+  never `fa-*`; the name must exist in `addons/web/icons.py` — `views.md` §12
 
 ## 9. Module / data
 
@@ -167,7 +173,9 @@ Manifest `data` order:
 `noupdate="1"` for records the user is expected to edit (cron defaults, templates,
 sequences).
 
-- Do **not** bump `version` in `__manifest__.py`
+- Do **not** bump `version` in `__manifest__.py`. A `19.0.x.y.z` version is different: it
+  makes the module uninstallable on 20 (`odoo/modules/module.py:500`) — report it and
+  change the series prefix only with the user's OK
 - Do **not** write migration scripts — solve data changes with a compute, a default, or a
   fill-only-if-empty pass
 - Do **not** add a README, tests or docs unless asked
@@ -206,6 +214,13 @@ name_get()                           → _compute_display_name()
 type='json'                          → type='jsonrpc'
 <tree> / attrs={} / t-esc            → <list> / invisible="..." / t-out
 useState() / reactive()              → proxy()
+useRef("x") / ref.el / t-ref="x"     → signal.ref() / this.x() / t-ref="this.x"
+useExternalListener()                → useListener() from @odoo/owl
+useEffect(fn, deps)  (OWL 2 style)   → useLayoutEffect(fn, () => deps) from @web/owl2/utils
+icon="fa-x" / class="fa fa-x"        → icon="name" / class="oi" data-icon="name"
+xpath "//t[@t-component='props.X']"  → copy the v20 attribute: 'this.props.X'
+_sql_constraints                     → models.Constraint(...) (v20 ignores the old one)
+'version': '19.0.x.y.z'              → flag it: uninstallable on 20, ask before changing
 fields.Date.today()  (default)       → fields.Date.today
 Monetary without currency_id         → always pair them
 M2O without ondelete                 → always set ondelete

@@ -18,7 +18,9 @@ by what core does, not by external documentation.
 7. [Services and registries](#7-services-and-registries)
 8. [Asset bundles](#8-asset-bundles)
 9. [Common patterns](#9-common-patterns)
-10. [Review checklist](#10-review-checklist)
+10. [Inheriting core OWL templates](#10-inheriting-core-owl-templates)
+11. [Migrating v19 frontend code](#11-migrating-v19-frontend-code)
+12. [Review checklist](#12-review-checklist)
 
 ---
 
@@ -31,10 +33,12 @@ by what core does, not by external documentation.
 | — | `signal(v)`, `signal.ref()` | `@odoo/owl` |
 | computed getter | `computed(() => ...)`, **called**: `this.pages()` | `@odoo/owl` |
 | `static props = {...}` | `props = useProps(schema)` with `t.*` types | `@odoo/owl` |
-| `useEffect` | `useLayoutEffect` | `@web/owl2/utils` |
-| `onWillRender`, `onRendered` | same names | `@web/owl2/utils` |
-| `useEnv`, `useSubEnv`, `useChildSubEnv` | same names | `@web/owl2/utils` |
-| `useRef`, `useComponent`, `useExternalListener` | same names | `@web/owl2/utils` |
+| `useEffect(fn, deps)` | `useLayoutEffect(fn, () => deps)` | `@web/owl2/utils` |
+| `onWillRender` | same name | `@web/owl2/utils` |
+| `useEnv`, `useSubEnv` | same names | `@web/owl2/utils` |
+| `useRef("x")` + `ref.el` | `x = signal.ref()` + `this.x()` | `@odoo/owl` |
+| `useExternalListener(t, ev, fn)` | `useListener(t, ev, fn)` | `@odoo/owl` |
+| `useComponent`, `useChildSubEnv`, `onRendered` | **gone** — 0 imports in core | — |
 | `t-esc` | `t-out` | — |
 | `t-slot="x"` | `t-call-slot="x"` | — |
 | implicit `props.x` in templates | explicit `this.props.x` | — |
@@ -43,8 +47,30 @@ by what core does, not by external documentation.
 Counts in `addons/web/static/src`: `useState` 0, `proxy(` 146, `useProps(` 320,
 `signal.ref()` 143, `computed(` 73, `t-esc` 2, `t-slot=` 0, `t-call-slot=` 95.
 
-Importing a legacy hook from `@odoo/owl` fails. Legacy hooks come from `@web/owl2/utils`,
-which is a thin re-export — [addons/web/static/src/owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js).
+### What each module actually exports (verified)
+
+- **`@odoo/owl`**: `App Component ErrorBoundary EventBus OwlError Plugin Portal Registry
+  Resource Scope Suspense TemplateSet applyDefaults assertType asyncComputed batched blockDom
+  computed config effect getDefault getScope globalTemplates htmlEscape immediateEffect
+  markRaw markup mount onError onMounted onPatched onWillDestroy onWillPatch onWillStart
+  onWillUnmount onWillUpdateProps plugin props providePlugins proxy shallowEqual signal
+  status t toRaw types untrack useApp useConfig useEffect useListener useOnChange usePlugin
+  useProps useScope validateType whenReady xml` — the `__export` block at the top of
+  [owl.js](../../../../addons/web/static/lib/owl/owl.js).
+- **`@web/owl2/utils`**: `render`, `onWillRender`, `useLayoutEffect`, `useEnv`, `useSubEnv`
+  — nothing else ([owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js)).
+
+Importing any other name (`useState`, `useRef`, `reactive`, `useComponent`,
+`useExternalListener`, `onRendered`, `useChildSubEnv`) does **not** fail the bundle: the
+binding is `undefined` and the component crashes when `setup()` calls it. Grep for them.
+
+`useEffect` is a trap: it still exists in `@odoo/owl`, but as `useEffect(fn)` — a reactive
+effect with no dependency list. An OWL 2 `useEffect(fn, () => [deps])` keeps compiling and
+the deps are ignored. Use `useLayoutEffect` from `@web/owl2/utils` for the OWL 2 behaviour.
+
+`static props` is still tolerated — core `dialog.js` keeps it and a core comment says static
+props "were ignored by the compat layer". It is not a breakage; `useProps` is the idiom for
+new code.
 
 ---
 
@@ -303,10 +329,85 @@ import { _t } from "@web/core/l10n/translation";
 
 ---
 
-## 10. Review checklist
+## 10. Inheriting core OWL templates
+
+Core templates were rewritten with explicit `this.`, so every xpath written against v19
+attribute text is dead:
+
+```xml
+<!-- v19 — matches nothing in v20, view crashes "cannot be located in element tree" -->
+<xpath expr="//t[@t-component='props.Renderer']" position="replace">
+
+<!-- v20 — copy the attribute text from the current core template -->
+<xpath expr="//t[@t-component='this.props.Renderer']" position="replace">
+```
+
+- Open the core template and copy the attribute **as it is now**
+  ([list_controller.xml:84](../../../../addons/web/static/src/views/list/list_controller.xml#L84)
+  for `web.ListView`). Never write an xpath from memory.
+- `replace` of a node that carries `t-if`: check the next sibling. In `web.ListView` the
+  renderer is followed by `<t t-elif="this.model.couldNotLoadRootOffline">`; a replacement
+  without the `t-if` leaves an orphan `t-elif` and the template fails to compile. Put the
+  condition on your wrapper.
+- Props you duplicate from a core node must match the v20 node exactly, with `this.`.
+- Templates rendered through `t-call` with a `t-set` (e.g. account report warnings:
+  `<t t-set="warningParams" .../>` in
+  [account_report.xml:71](../../../../enterprise/account_reports/static/src/components/account_report/account_report.xml#L71))
+  receive **locals** — keep `warningParams` without `this.`.
+- Core component refs are signals: `FormController.rootRef = signal.ref()`
+  ([form_controller.js:164](../../../../addons/web/static/src/views/form/form_controller.js#L164)).
+  A subclass or patch reading `this.rootRef.el` gets `undefined` — call `this.rootRef()`.
+- Test every xpath against the core template before shipping:
+
+```python
+# data_venv/bin/python, repo root — prints OK/MISS per xpath
+from lxml import etree
+core = etree.parse('addons/web/static/src/views/list/list_controller.xml')
+tpl = next(t for t in core.iter('t') if t.get('t-name') == 'web.ListView')
+print(bool(tpl.xpath("//t[@t-component='this.props.Renderer']")))
+```
+
+---
+
+## 11. Migrating v19 frontend code
+
+Odoo ships `odoo/upgrade_code/owl3-migration.py`. **Do not run it wholesale** — in this
+checkout it is ahead of core: it rewrites `t-ref` to `t-custom-ref` and
+`useService("action")` to `usePlugin(ActionManagerPlugin)`, while core has 887 `t-ref` /
+0 `t-custom-ref` and 434 `useService("action")` / 0 `usePlugin(ActionManagerPlugin)`, and
+`t-custom-ref` is not a registered directive in
+[env.js](../../../../addons/web/static/src/env.js). Run on core, it would change 1650
+already-migrated files.
+
+Procedure that matches core:
+
+1. Run only these steps: `upgrade_usestate`, `upgrade_reactive`, `upgrade_t_esc`,
+   `upgrade_this`, `upgrade_t_slot`, `upgrade_parametric_tcall`.
+2. `odoo-bin upgrade_code` always adds `odoo/addons`, and `upgrade_this` needs the core
+   templates to know each parent template's locals. So load `addons` + `enterprise` +
+   custom into one `FileManager` (`odoo.cli.upgrade_code`), call the steps through
+   `MigrationCollector.run_sub`, and `_save()` **only** files under `custom_addons/`.
+3. Review the diff. `upgrade_this` wrongly prefixes `t-call` locals it cannot see (it
+   produced `this.warningParams`) — revert those.
+4. Fix by hand what the script leaves: `useRef` → `signal.ref()` (template
+   `t-ref="this.x"`, JS `this.x()`), `.el` on core refs, xpaths into core templates (§10).
+5. Verify: every `this.x` in a template exists on the component or its core parent; every
+   import resolves and every named import is exported by the target file; every `patch()`
+   target method still exists in the v20 class.
+6. Server QWeb is not covered by this script: replace `t-esc` → `t-out` in `views/`,
+   `report/`, `wizard/` XML (v20 renders an unknown `t-esc` as nothing).
+
+---
+
+## 12. Review checklist
 
 - [ ] No `useState` / `reactive` — `proxy()` instead
-- [ ] Legacy hooks imported from `@web/owl2/utils`, not `@odoo/owl`
+- [ ] Only `render`, `onWillRender`, `useLayoutEffect`, `useEnv`, `useSubEnv` come from
+      `@web/owl2/utils`; no import of a name `@odoo/owl` does not export (§1)
+- [ ] Refs are `signal.ref()`, read as `this.x()` — no `.el`, no string `t-ref`
+- [ ] No OWL 2 `useEffect(fn, deps)` — `useLayoutEffect` instead
+- [ ] Every xpath into a core template matches the **current** core attribute text (§10)
+- [ ] Icons are Material Symbols (`class="oi" data-icon="..."`), never `fa fa-*` — `views.md`
 - [ ] `computed` / `signal` values are called with `()` in JS **and** in templates
 - [ ] `props = useProps(schema)` with `t.*` types; schema exported
 - [ ] Every `t-foreach` has `t-key`

@@ -13,7 +13,8 @@
 9. [QWeb Report Templates](#9-qweb-report-templates)
 10. [Actions & Menus](#10-actions--menus)
 11. [Common Patterns](#11-common-patterns)
-12. [Antipatterns](#12-antipatterns)
+12. [Icons (Material Symbols)](#12-icons-material-symbols)
+13. [Antipatterns](#13-antipatterns)
 
 ---
 
@@ -55,7 +56,7 @@
                 <!-- Smart buttons -->
                 <div class="oe_button_box" name="button_box">
                     <button name="action_open_invoices" type="object"
-                            class="oe_stat_button" icon="fa-money">
+                            class="oe_stat_button" icon="payments">
                         <field name="invoice_count" string="Invoices"
                                widget="statinfo"/>
                     </button>
@@ -190,9 +191,9 @@
             </group>
             <!-- Search panels (left sidebar) -->
             <searchpanel>
-                <field name="state" icon="fa-tasks"
+                <field name="state" icon="checklist"
                        select="one" enable_counters="1"/>
-                <field name="user_id" icon="fa-user"
+                <field name="user_id" icon="person"
                        select="multi" enable_counters="1"/>
             </searchpanel>
         </search>
@@ -356,7 +357,7 @@ Calendar attributes:
         <!-- Add content inside an element (at the end) -->
         <xpath expr="//div[@name='button_box']" position="inside">
             <button name="action_open_custom" type="object"
-                    class="oe_stat_button" icon="fa-cog">
+                    class="oe_stat_button" icon="settings">
                 <field name="custom_count" string="Custom" widget="statinfo"/>
             </button>
         </xpath>
@@ -679,7 +680,7 @@ The called template's body is still available as `t-out="0"`. Real example:
 ### URL button:
 ```xml
 <button type="object" name="action_open_url"
-        string="Open Website" icon="fa-external-link"/>
+        string="Open Website" icon="open_in_new"/>
 ```
 
 ### Widget reference (common field widgets):
@@ -713,7 +714,74 @@ The called template's body is still available as `t-out="0"`. Real example:
 
 ---
 
-## 12. Antipatterns
+## 12. Icons (Material Symbols)
+
+Font Awesome is gone in v20. Icons are **Material Symbols**, drawn as font ligatures: the
+text in `data-icon` is turned into the glyph by the font.
+
+```xml
+<!-- buttons, stat buttons, searchpanel fields: the name only -->
+<button name="action_open" type="object" icon="open_in_new" string="Open"/>
+
+<!-- markup: class="oi" + data-icon, plus a title for screen readers -->
+<i class="oi me-1" data-icon="warning" title="Out of sync"/>
+
+<!-- solid variant, utilities, brand icons -->
+<i class="oi oi-filled" data-icon="check_circle" title="Active"/>
+<i class="oi oi-spin oi-2x" data-icon="progress_activity" title="Loading"/>
+<i class="oi" data-icon="oi_github" title="GitHub"/>
+```
+
+- Button `icon=` is copied into `data-icon` as-is —
+  [view_button.js:24](../../../../addons/web/static/src/views/view_button/view_button.js#L24).
+  A leftover `icon="fa-search-plus"` renders the ligature it can find plus the literal
+  dashes: `-🔍-`. There is no `fa-` compatibility mapping any more.
+- **Only names in the shipped font subset render.** The list is `ICONS` in
+  [addons/web/icons.py](../../../../addons/web/icons.py) (Material Symbols plus the `oi_`
+  brand/legacy set). Check a name before using it:
+  `grep -q "^    'zoom_in'" addons/web/icons.py`.
+- `<i data-icon>` without `title`, `aria-label` or text in itself, a parent or a child
+  triggers a view-validation warning on module update.
+- Utilities: `fa-spin` → `oi-spin`, `fa-2x` → `oi-2x`, `fa-fw` → `oi-fw`, `fa-lg` → `oi-lg`.
+  Outlined is the default; FA's solid-vs-`-o` pair becomes one name, with `oi-filled` for
+  the solid look where the difference carries meaning.
+- SCSS and test selectors keyed on the icon must move: `.fa-truck` →
+  `[data-icon="local_shipping"]`, `.fa` → `.oi`; tours using `.fa-caret-right` →
+  `[data-icon=arrow_right]`.
+
+Common Font Awesome → Material Symbols names (all verified in `icons.py`):
+
+| FA | MS | FA | MS | FA | MS |
+|---|---|---|---|---|---|
+| check | `check` | times | `close` | plus | `add` |
+| trash, trash-o | `delete` | pencil | `edit` | pencil-square-o | `edit_square` |
+| search | `search` | search-plus | `zoom_in` | refresh | `refresh` |
+| download | `download` | cloud-upload | `cloud_upload` | cloud-download | `cloud_download` |
+| print | `print` | external-link | `open_in_new` | link / unlink | `link` / `link_off` |
+| lock | `lock` | ban | `block` | undo | `undo` |
+| history | `history` | clock-o | `schedule` | calendar | `calendar_today` |
+| bell | `notifications` | user / users | `person` / `group` | id-card-o | `badge` |
+| truck | `local_shipping` | car | `directions_car` | shopping-cart | `shopping_cart` |
+| money | `payments` | file-text(-o) | `description` | list-alt | `list_alt` |
+| list / list-ul | `view_list` / `format_list_bulleted` | sort-numeric-asc | `format_list_numbered` | table | `table_chart` |
+| line-chart | `show_chart` | tachometer | `speed` | sitemap | `account_tree` |
+| exchange | `swap_horiz` | arrows-h | `arrow_range` | arrow-right, long-arrow-right | `east` |
+| level-up | `arrow_upward` | caret-right / caret-down | `arrow_right` / `arrow_drop_down` | info-circle | `info` |
+| question-circle | `help` | exclamation-triangle | `warning` | exclamation-circle | `error` |
+| check-circle(-o) | `check_circle` | times-circle(-o) | `cancel` | check-square-o | `check_box` |
+| circle / circle-o | `circle` / `radio_button_unchecked` | play / pause / stop | `play_arrow` / `pause` / `stop` | paper-plane, send | `send` |
+| eye | `visibility` | copy | `content_copy` | bookmark | `bookmark` |
+| key | `key` | plug | `power` | sign-out | `logout` |
+| globe | `public` | flask | `science` | rocket | `rocket_launch` |
+| magic | `wand_stars` | eraser | `ink_eraser` | cubes | `deployed_code` |
+| building-o | `business` | inbox | `inventory_2` | road | `signpost` |
+| bullseye | `my_location` | hourglass-half | `hourglass_top` | circle-o-notch (spin) | `progress_activity` |
+| archive | `archive` | cog | `settings` | tasks | `checklist` |
+| life-ring | `support` | flag | `flag` | | |
+
+---
+
+## 13. Antipatterns
 
 ### DO NOT use deprecated `attrs`:
 ```xml

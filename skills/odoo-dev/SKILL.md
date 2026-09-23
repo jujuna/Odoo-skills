@@ -45,9 +45,16 @@ changed from 19. If you are about to write something you remember from v19, chec
    fields, no duplicated methods, no second model for data that belongs on an existing one.
 9. **Few validations.** Block only real data corruption, once, at the real boundary. Prefer
    making a wrong value impossible (domain/readonly/default) over raising an error.
-10. **Minimal comments.** No comment that restates code. One-line docstring only when the
-    method name is not enough. Never touch comments in code you did not change.
+10. **Docstrings, not comments.** Explain code in the method docstring, not in inline
+    `#` / `//` comments. Every method you write or substantially change gets a docstring
+    that says what it does and why (the business rule, the edge case, the side effect a
+    caller must know) in 1–4 lines, never an essay. Skip it only for a trivial one-liner
+    whose name says everything. Inline comments only when one line is genuinely
+    non-obvious (a workaround, a framework gotcha, a security or transaction reason).
+    Never a comment that restates the code; never touch comments in code you did not change.
 11. **Never** write a migration script. **Never** bump `version` in `__manifest__.py`.
+    Exception to flag, not to do silently: a `19.0.x.y.z` version makes the module
+    uninstallable on 20 — changing the series prefix to `20.0.` needs the user's OK.
 12. **Ask before writing tests.** Tests are not automatic. When a change would normally
     warrant them, say which behaviors you would cover and let the user decide. Never add a
     README or docs unless asked.
@@ -85,7 +92,7 @@ Load **only** the file(s) the current task needs.
 | Raw SQL, indexes, query plans | `references/sql.md` |
 | Full module skeleton / boilerplate | `references/scaffold.md` |
 | OWL 3 components, services, hooks | `references/owl.md` |
-| XML views, inheritance, expressions, QWeb reports | `references/views.md` |
+| XML views, inheritance, expressions, QWeb reports, icons | `references/views.md` |
 | HTTP/JSON-RPC controllers, JSON-2 API, portal | `references/controllers.md` |
 | Wizards (TransientModel), multi-step, actions | `references/wizards.md` |
 | mail.thread, tracking, message_post, activities | `references/mail.md` |

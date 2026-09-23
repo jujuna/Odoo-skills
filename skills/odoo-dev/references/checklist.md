@@ -53,7 +53,8 @@ Run this before returning any code. Every item is a real bug or a real review bl
 ## Python / ORM
 
 - [ ] New model has `_description`
-- [ ] Docstring only where the method name is not enough, and one line long
+- [ ] Every new or changed non-trivial method has a docstring (what + why, 1–4 lines)
+- [ ] No inline `#` / `//` comments unless the line is genuinely non-obvious
 - [ ] Methods are batch-safe; no accidental singleton assumptions
 - [ ] `ensure_one()` only where one record is truly required
 - [ ] `create()` overrides use `@api.model_create_multi` and call `super()` once
@@ -90,10 +91,15 @@ Run this before returning any code. Every item is a real bug or a real review bl
 
 - [ ] `<list>`, expression syntax, `name=` on `<page>` and `<filter>`
 - [ ] `<chatter/>` when the model inherits `mail.thread`
-- [ ] `t-out`, never `t-esc`
+- [ ] `t-out`, never `t-esc` — in OWL templates **and** server QWeb (views, reports, wizards)
 - [ ] `t-call` parameters passed as attributes
-- [ ] OWL: `proxy()` not `useState()`; legacy hooks from `@web/owl2/utils`
+- [ ] OWL: `proxy()` not `useState()`; no import `@odoo/owl` does not export; only
+      `render`/`onWillRender`/`useLayoutEffect`/`useEnv`/`useSubEnv` from `@web/owl2/utils`
+- [ ] OWL: refs via `signal.ref()`, read as `this.x()` — no `.el`
 - [ ] OWL: `computed`/`signal` values called with `()`; `t-key` on every `t-foreach`
+- [ ] xpaths into core OWL templates tested against the current core template
+- [ ] Icons: Material Symbols names that exist in `addons/web/icons.py`; no `fa-*`;
+      every `<i data-icon>` has a `title` or text
 - [ ] No inline styles — Bootstrap classes
 
 ## Mail / tracking
