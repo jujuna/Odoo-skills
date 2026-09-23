@@ -47,6 +47,9 @@ Add `controllers/`, `report/`, `tests/`, `demo/`, `static/src/` only when the ta
     'version': '1.0',
     'category': 'CATEGORY',
     'summary': "SHORT_SUMMARY",
+    'description': """
+PLAIN_TEXT_DESCRIPTION — two or three sentences, no Markdown.
+""",
     'author': "AUTHOR",
     'license': 'LGPL-3',
     'depends': ['base'],
@@ -63,6 +66,11 @@ Add `controllers/`, `report/`, `tests/`, `demo/`, `static/src/` only when the ta
 ```
 
 - `version` is `'1.0'` — module-local, never the Odoo series, and never bumped by us
+- always set `description` (core: 1195 of 1513 modules do). Without it, and without
+  `static/description/index.html`, Odoo renders `README.*` as reStructuredText
+  ([ir_module.py:181](../../../../odoo/addons/base/models/ir_module.py#L181)): a Markdown
+  `README.md` prints docutils errors on every module update and shows mangled on the Apps
+  page. Keep the text plain — it is parsed as RST too
 - depend on the smallest module that provides what you need
 - `'application': True` only if this deserves its own Apps tile
 
