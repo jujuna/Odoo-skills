@@ -531,6 +531,22 @@ does, and add the form button.
 **draft** slips ([hr_payroll_account/models/hr_payslip.py:56](../../../../enterprise/hr_payroll_account/models/hr_payslip.py#L56)).
 An override that validates slip by slip lets the first slip post the others before their checks run.
 
+Found while porting `geo_payroll` and its 352 tests (2026-09-23):
+
+| v19 | v20 | Bites |
+|---|---|---|
+| Monthly worked-day amount = wage x hours / the slip's own worked hours | wage x hours / the **calendar's** work hours in the period ([hr_payslip_worked_days.py:66](../../../../enterprise/hr_payroll/models/hr_payslip_worked_days.py#L66)) | a test that fakes 160 h for a 176 h month now gets 1454.55, not 1600 |
+| `hr.payslip.worked_days.version_id` related to the payslip | required stored field of its own (:28) | hand-made worked days need `version_id` |
+| Refund created as a draft | `_action_refund_payslips()` validates it on creation (`hr_payslip.py:1207`) | a refund needs a validated origin; draft-refund states are gone |
+| Out-of-contract work entry code `OUT` | `000.00` (`hr_work_entry.generic_hr_work_entry_type_out_of_contract`) | code checks on `'OUT'` never match |
+| `resource.calendar.tz` | gone; `res.company.tz` and a required `hr.version.tz` | `calendar.tz = ...` raises AttributeError |
+| New structure: no rules | `rule_ids` defaults to copies of `hr_payroll.default_structure` rules | pass `rule_ids` explicitly in data (`eval="[]"`) to get none |
+| Draft run opens its payslips | `action_open_payslips()` calls `_generate_payslips()` every time a draft run is opened (`hr_payslip_run.py:409`) | an override must not raise when nothing new is left to generate |
+
+`account.payment.register` refuses lines of more than one `account_type` in one wizard, with the
+misleading message "both inbound and outbound moves" (`account_payment_register.py:1049`; same in v19).
+Salary NET, pension and any tax account paid together must share one type (Payable).
+
 ---
 
 ## 13. Unchanged — do not "fix" these
