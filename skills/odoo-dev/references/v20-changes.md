@@ -404,6 +404,37 @@ Also proven while installing the gec modules on a test database (2026-09-23):
 - Payroll: `hr.salary.rule.category_id` no longer exists and the xmlid
   `hr_payroll.hr_payslip_run_view_kanban` is gone (replacements not checked yet).
 
+Found while planning the `l10n_ge` merge of `gec_localization` + `gec_l10n_ge_tax` (2026-09-23):
+
+- **Withholding field renames** in `l10n_account_withholding_tax`: `account.tax.is_withholding_tax_on_payment`
+  → `is_withholding_tax` ([account_tax.py:13](../../../../addons/l10n_account_withholding_tax/models/account_tax.py#L13));
+  `account.payment.should_withhold_tax` (Boolean) → `withhold` (Selection `withhold_pay` / `withhold` / `payment`,
+  [account_payment.py:13](../../../../addons/l10n_account_withholding_tax/models/account_payment.py#L13)).
+  Views, domains and chart data using the old names fail at install.
+- **`account.tax.group` lost its settlement accounts** (`tax_payable_account_id`, `tax_receivable_account_id`,
+  `advance_tax_payment_account_id`). They moved to `account.return.type`, company-dependent. Full notes:
+  `documentations/account_returns.md`.
+- **Core ships `l10n_ge`** and owns chart template `'ge'`. Chart-template functions are registered by
+  *method name*, top of the MRO wins ([chart_template.py:78](../../../../addons/account/models/chart_template.py#L78)):
+  a custom module that reuses a core name such as `_get_ge_res_company` silently replaces it. Extend a
+  core chart with unique method names and `depends` on the l10n module; only define `@template('xx')`
+  (model `template_data`) when you really create a new chart.
+- **Installing** a module with `@template(code, model)` functions loads them into every existing company
+  on that chart ([ir_module.py:72](../../../../addons/account/models/ir_module.py#L72): `_pre_reload_data`
+  + `_load_data`). An upgrade (`-u`) does not. A backfill `post_init_hook` is redundant; records added in
+  a later version still need a maintenance function or a chart reload.
+- **No Georgian VAT return type.** Return types live in enterprise `l10n_xx_reports` modules (e.g.
+  `l10n_at_reports/data/account_return_data.xml`). There is no `l10n_ge_reports`, and `account_reports`
+  ships only the annual CIT and audit types (`account_return_data.xml`).
+- **Account hierarchy is native**: `account.account` is `_parent_store` with `parent_id` and `active`
+  (l10n CSVs load header accounts inactive), and the form and list already show Parent Account
+  ([account_account_views.xml:72](../../../../addons/account/views/account_account_views.xml#L72)).
+  The form has no `page[@name='Description']` any more.
+- **Payment register pays only receivable/payable lines**: `account.payment._get_valid_payment_account_types()`
+  returns `asset_receivable`, `liability_payable` ([account_payment.py:247](../../../../addons/account/models/account_payment.py#L247)).
+  `l10n_ge`'s 310310 Salaries Payable is `liability_current` and 332010 Pension is not reconcilable, so
+  payroll NET and pension legs on them cannot be paid through the register as shipped.
+
 ---
 
 ## 12. Unchanged — do not "fix" these
