@@ -1,4 +1,4 @@
-# Odoo 19 Project — Claude Code Instructions
+# Odoo 20 Project — Claude Code Instructions
 
 ## Project Structure
 
@@ -9,11 +9,33 @@
 | `custom_addons/` | Our custom development — this is where we build |
 | `themes/` | Website themes |
 | `documentations/` | Business module docs we maintain |
-| `.claude/skills/odoo-dev/` | Coding standards + 17 reference files |
+| `.claude/skills/odoo-dev/` | Coding standards + reference files |
 
 ## Odoo Version
 
-**Odoo 19**, Python 3.10+. Non-negotiable v19 API rules are in `.claude/skills/odoo-dev/references/guardrails.md` — always follow them.
+**Odoo 20**, Python 3.12–3.14. Non-negotiable v20 API rules are in
+`.claude/skills/odoo-dev/references/guardrails.md` — always follow them.
+
+Odoo 20 changed several things that v19 habits get wrong. The full verified delta is in
+`.claude/skills/odoo-dev/references/v20-changes.md`. The three that bite most often:
+
+- `ir.model.access` **and** `ir.rule` are gone — one `security/ir.access.csv` replaces both,
+  and it loads **last** in the manifest (groups file still loads first)
+- OWL 3: `proxy()` instead of `useState()`, `t-out` instead of `t-esc`, explicit `this.` in
+  templates
+- `compute_sql=` makes a non-stored computed field searchable and groupable — reach for it
+  before `store=True`
+
+## Standing Rules
+
+- **Multi-company by default.** Every model storing business data gets `company_id`,
+  `check_company=True` on scoped relations, and a company restriction row in
+  `ir.access.csv`. Single-company needs a stated reason.
+- **Sweep before changing anything that exists.** Grep callers, overrides and inheriting
+  views, and state the result. See `references/dependencies.md`.
+- **Match core.** Find the same thing in `addons/`/`enterprise/` and copy the pattern. If a
+  change belongs in several places, do it the way core keeps them consistent.
+- **Ask before writing tests.** Say what you would cover and let us decide.
 
 ## Coding Conventions
 

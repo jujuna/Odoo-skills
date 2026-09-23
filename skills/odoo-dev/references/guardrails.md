@@ -214,6 +214,7 @@ name_get()                           → _compute_display_name()
 type='json'                          → type='jsonrpc'
 <tree> / attrs={} / t-esc            → <list> / invisible="..." / t-out
 useState() / reactive()              → proxy()
+static props / static defaultProps   → props = useProps(schema)  (static form throws)
 useRef("x") / ref.el / t-ref="x"     → signal.ref() / this.x() / t-ref="this.x"
 useExternalListener()                → useListener() from @odoo/owl
 useEffect(fn, deps)  (OWL 2 style)   → useLayoutEffect(fn, () => deps) from @web/owl2/utils

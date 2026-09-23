@@ -32,7 +32,7 @@ by what core does, not by external documentation.
 | `reactive(obj)` | `proxy(obj)` | `@odoo/owl` |
 | — | `signal(v)`, `signal.ref()` | `@odoo/owl` |
 | computed getter | `computed(() => ...)`, **called**: `this.pages()` | `@odoo/owl` |
-| `static props = {...}` | `props = useProps(schema)` with `t.*` types | `@odoo/owl` |
+| `static props = {...}` | `props = useProps(schema)` with `t.*` types — `static props` **throws** | `@odoo/owl` |
 | `useEffect(fn, deps)` | `useLayoutEffect(fn, () => deps)` | `@web/owl2/utils` |
 | `onWillRender` | same name | `@web/owl2/utils` |
 | `useEnv`, `useSubEnv` | same names | `@web/owl2/utils` |
@@ -68,9 +68,20 @@ binding is `undefined` and the component crashes when `setup()` calls it. Grep f
 effect with no dependency list. An OWL 2 `useEffect(fn, () => [deps])` keeps compiling and
 the deps are ignored. Use `useLayoutEffect` from `@web/owl2/utils` for the OWL 2 behaviour.
 
-`static props` is still tolerated — core `dialog.js` keeps it and a core comment says static
-props "were ignored by the compat layer". It is not a breakage; `useProps` is the idiom for
-new code.
+**`static props` / `static defaultProps` crash the component.** The compatibility layer
+throws in the constructor — "defines a static "props" or "defaultProps", which Owl 3
+ignores" — for every component that has either
+([owl3_compatibility_layer.js:45](../../../../addons/web/static/src/owl2/owl3_compatibility_layer.js#L45)).
+Core has none left. Replace by the matching core schema:
+
+| Component | v20 declaration |
+|---|---|
+| field widget | `props = useProps(standardFieldProps)` (78 core uses), or `useProps({ ...standardFieldProps, extra: t.string().optional() })` |
+| client action (`static props = ["*"]`) | `props = useProps(standardActionServiceProps)` from `@web/webclient/actions/action_plugin` |
+| dialog / any component | `props = useProps({ close: t.function(), x: t.number(), y: t.any().optional() })` |
+
+`static propsSchema` in core `dialog.js` is a different, temporary mechanism for dialog
+subclasses — not a replacement for `static props`.
 
 ---
 
@@ -389,8 +400,9 @@ Procedure that matches core:
    `MigrationCollector.run_sub`, and `_save()` **only** files under `custom_addons/`.
 3. Review the diff. `upgrade_this` wrongly prefixes `t-call` locals it cannot see (it
    produced `this.warningParams`) — revert those.
-4. Fix by hand what the script leaves: `useRef` → `signal.ref()` (template
-   `t-ref="this.x"`, JS `this.x()`), `.el` on core refs, xpaths into core templates (§10).
+4. Fix by hand what the script leaves: `static props` → `useProps` (§1 — it throws),
+   `useRef` → `signal.ref()` (template `t-ref="this.x"`, JS `this.x()`), `.el` on core
+   refs, xpaths into core templates (§10).
 5. Verify: every `this.x` in a template exists on the component or its core parent; every
    import resolves and every named import is exported by the target file; every `patch()`
    target method still exists in the v20 class.
@@ -404,6 +416,7 @@ Procedure that matches core:
 - [ ] No `useState` / `reactive` — `proxy()` instead
 - [ ] Only `render`, `onWillRender`, `useLayoutEffect`, `useEnv`, `useSubEnv` come from
       `@web/owl2/utils`; no import of a name `@odoo/owl` does not export (§1)
+- [ ] No `static props` / `static defaultProps` anywhere — they throw; `props = useProps(...)`
 - [ ] Refs are `signal.ref()`, read as `this.x()` — no `.el`, no string `t-ref`
 - [ ] No OWL 2 `useEffect(fn, deps)` — `useLayoutEffect` instead
 - [ ] Every xpath into a core template matches the **current** core attribute text (§10)

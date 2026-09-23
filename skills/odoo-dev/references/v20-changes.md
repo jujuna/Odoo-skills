@@ -249,6 +249,7 @@ reactivity model, not a version bump. See `owl.md` for the working rules.
 | OWL 2 | OWL 3 |
 |---|---|
 | `useState(obj)` / `reactive(obj)` | `proxy(obj)` from `@odoo/owl` |
+| `static props` / `static defaultProps` | `props = useProps(schema)` — the static form **throws** in the component constructor ([owl3_compatibility_layer.js:45](../../../../addons/web/static/src/owl2/owl3_compatibility_layer.js#L45)); field widgets use `useProps(standardFieldProps)`, client actions `useProps(standardActionServiceProps)` |
 | `useEffect(fn, deps)` | `useLayoutEffect(fn, () => deps)` from `@web/owl2/utils`. `@odoo/owl` still exports a `useEffect(fn)`, but it is a new one-argument reactive effect — a deps argument is silently ignored |
 | `useEnv`, `useSubEnv`, `onWillRender` | from `@web/owl2/utils` — its **only** exports are these three plus `render` and `useLayoutEffect` ([owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js)) |
 | `useRef("x")` + `t-ref="x"` + `ref.el` | `x = signal.ref()` + `t-ref="this.x"` + `this.x()` — `.el` is `undefined`, no error |

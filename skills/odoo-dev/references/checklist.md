@@ -95,6 +95,7 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] `t-call` parameters passed as attributes
 - [ ] OWL: `proxy()` not `useState()`; no import `@odoo/owl` does not export; only
       `render`/`onWillRender`/`useLayoutEffect`/`useEnv`/`useSubEnv` from `@web/owl2/utils`
+- [ ] OWL: `props = useProps(...)`, never `static props` / `static defaultProps` (they throw)
 - [ ] OWL: refs via `signal.ref()`, read as `this.x()` — no `.el`
 - [ ] OWL: `computed`/`signal` values called with `()`; `t-key` on every `t-foreach`
 - [ ] xpaths into core OWL templates tested against the current core template
