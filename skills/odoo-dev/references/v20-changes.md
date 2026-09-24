@@ -497,6 +497,18 @@ whose `date_version` falls in the slip period ([hr_payslip.py:2180](../../../../
 and prices each worked-day line with its own `version_id`. A second, manually created slip for the
 later version pays that slice again.
 
+**New "Version update" dialog on the employee form (not in v19).** `hr_payroll` patches
+`EmployeeFormController.onRecordChanged` ([version_record_patch.js:15](../../../../enterprise/hr_payroll/static/src/js/version_record_patch.js#L15)):
+on the first change of an existing employee whose shown version is the latest one and has
+`validated`/`paid` payslips, it asks "Create new version / Correct the current version". The only
+exclusions are `contract_date_end` and `resource_calendar_id` (module-private const, not extensible).
+**Pitfall:** it does not filter employee-only fields the way core `hr` does
+(`record.fields[key].related?.includes('version_id')`, [form_view.js:40](../../../../addons/hr/static/src/views/form_view.js#L40)),
+so a custom one2many on `hr.employee` (e.g. `geo_payroll.work_log_ids`) triggers it. "Create new
+version" then sends the changes to `action_create_version_from_update`, which keeps only `hr.version`
+fields, and discards the form: the employee-only edit is lost. Default date is broken
+(`toISOString().slice(0, 8)` + `-01` = `2026-09--01`), so the date input starts empty.
+
 **Pay runs** ([models/hr_payslip_run.py](../../../../enterprise/hr_payroll/models/hr_payslip_run.py)):
 
 | v19 | v20 |
@@ -531,6 +543,17 @@ does, and add the form button.
 **draft** slips ([hr_payroll_account/models/hr_payslip.py:56](../../../../enterprise/hr_payroll_account/models/hr_payslip.py#L56)).
 An override that validates slip by slip lets the first slip post the others before their checks run.
 
+**Payslip read access for a non-HR group breaks in v20** (verified 2026-09-24, `hr_customization`
+team leaders). `hr.payslip.name` was stored in v19; in v20 it is non-stored and computed from
+`employee_id.legal_name`, which is `hr.group_hr_user` only ([hr_payslip.py:53](../../../../enterprise/hr_payroll/models/hr_payslip.py#L53)).
+A group given `r` on `hr.payslip` then fails on `name`, `display_name`, `allowed_version_ids` and
+`employee_version_ids_count` (AccessError on form open). Fix: redefine those three with
+`compute_sudo=True`, as core does for `is_wrong_duration` (:179). Also, the `hr_payroll_attendance`
+stat button now hides on `attendance_based` (was `attendance_count`), restricted to
+system / HR manager / payroll user ([hr_version.py:7](../../../../enterprise/hr_payroll_attendance/models/hr_version.py#L7)):
+extend its `groups`, and give the group `r` on `hr.attendance`, because `attendance_count`
+reads attendances as the user.
+
 Found while porting `geo_payroll` and its 352 tests (2026-09-23):
 
 | v19 | v20 | Bites |
@@ -554,6 +577,62 @@ Salary NET, pension and any tax account paid together must share one type (Payab
 `group_hr_payroll_user` is now **Assistant**, the new `group_hr_payroll_officer` is Officer, and
 Administrator implies Officer plus `hr.group_hr_manager` (:30). A custom group that implies
 `group_hr_payroll_user` "for Officer rights" now grants Assistant only.
+
+**Payslip header cards and line explanations** (verified 2026-09-24, `geo_payroll`):
+
+- The new form cards ([views/hr_payslip_views.xml:90](../../../../enterprise/hr_payroll/views/hr_payslip_views.xml#L90))
+  read `sum_worked_paid_days/hours` (worked-day lines whose work entry type rate is non-zero, i.e. the
+  schedule) and `basic_wage` = the `BASIC` line only (`_get_basic_wage_line_codes`,
+  [models/hr_payslip.py:620](../../../../enterprise/hr_payroll/models/hr_payslip.py#L620)). A structure
+  whose base sits in other codes shows Wage 0.00. l10n_be widens the code set; `geo_payroll` leaves the
+  cards alone (user decision) and adds its own card beside them (xpath `//div[@name='payslip_summary_widget']/div[1]`).
+- Per-line tooltip: rule field `explanation_template` (translatable) is `.format(**explanation_info)`,
+  where the rule code sets `explanation_info = {...}` in localdict (:1854, :1915; l10n_be uses
+  `{explanation}` and builds the text in Python). **Pitfall:** on a manual line edit the engine forces
+  lines with stored amounts and sets `explanation_info = {}`, so any template with a placeholder turns
+  into "Explanation couldn't be computed due to a syntax issue" — restore it in your
+  `_recompute_with_forced_lines` override. Don't detect that text by comparing with `self.env._(...)`:
+  `env._` picks the module from the caller's frame, so the Georgian lookup differs from core's.
+- `formatLang` rounds HALF-EVEN by default; payslip line totals round half-up. Pass
+  `rounding_method='HALF-UP'` for amounts shown next to lines (10.625 shows 10.62 otherwise, line 10.63).
+- `hr.payslip.edited` is set by any inline line edit ([models/hr_payslip.py:806](../../../../enterprise/hr_payroll/models/hr_payslip.py#L806))
+  and never cleared: not by Compute, not by Cancel → Set to Draft (`action_payslip_draft`, :843). Logic
+  keyed on `edited` stays on for the payslip's life; the way out is a new payslip. The edit audit keys
+  lines by `salary_rule_id`, so two lines of one rule (e.g. two benefit deductions) log as a rename.
+
+### HR, recruitment, salary configurator
+
+Found while porting `alta_hr_customization/hr_customization` (2026-09-24). Each one was proven by a
+failed install or a live `/hr_customization/offer/accept` call on a scratch DB.
+
+| v19 | v20 | Bites |
+|---|---|---|
+| module `hr_org_chart` | merged into `hr` (commit `ea8ddab54acb`); xmlids move with it, e.g. `hr.hr_department_hierarchy_view` | `depends` fails with "hr_org_chart is not available"; `ref="hr_org_chart.x"` fails at install |
+| `hr.applicant.user_id` (recruiter, `res.users`) | `recruiter_id` Many2one `hr.employee` ([hr_applicant.py:101](../../../../addons/hr_recruitment/models/hr_applicant.py#L101)); use `recruiter_id.user_id` for the user | `<field name="user_id" position=...>` cannot be located; Python reads `False` |
+| `hr.version.contract_type_id` → `hr.contract.type` | `employee_type_id` → `hr.employee.type` (commit `6057e25f8c12`) | a groups-only redefinition `contract_type_id = fields.Many2one(groups=...)` declares a new field with no comodel |
+| `contract_date_start/end` narrowed to `hr_payroll.group_hr_payroll_user` by `hr_payroll` | `hr.group_hr_user` in `hr`, not narrowed any more | a copied v19 `groups=` override now takes the dates away from HR officers |
+| `hr.version.hourly_wage` Monetary | Float, 4 digits (see §12) | a `fields.Monetary(groups=...)` override silently changes the field type |
+
+**`hr_contract_salary` simulation** ([utils/hr_version.py](../../../../enterprise/hr_contract_salary/utils/hr_version.py)):
+
+- The hand-written `flush_all()` + `cr.savepoint(flush=False)` + `rollback()` block is replaced by
+  `with hr_version_context(request, invalidate=True):`. `offer._get_version()` is decorated
+  `@requires_hr_version_context()` and raises `RuntimeError` outside it.
+- The check reads the **record's own** `env.context`, so browse the offer inside the block, the way
+  core `submit` does ([controllers/main.py:1082](../../../../enterprise/hr_contract_salary/controllers/main.py#L1082)).
+  An offer browsed before the block fails.
+- `create_new_version(version_vals, offer, benefits, ...)` takes the offer **record** (v19: `offer_id`) and
+  calls `offer._get_version()` itself ([controllers/main.py:770](../../../../enterprise/hr_contract_salary/controllers/main.py#L770)),
+  so it needs the offer browsed inside the block. Use a separate, normal-context record for writes after
+  the block: the block's context carries `tracking_disable`.
+- `hr.version._get_gross_from_employer_costs()` is gone. `_get_version()` now writes `wage` from
+  `_get_wage_from_yearly_costs(offer.final_yearly_costs)` ([hr_contract_salary_offer.py:192](../../../../enterprise/hr_contract_salary/models/hr_contract_salary_offer.py#L192)).
+  Build `version_vals` with `self._compute_submit(version, offer, benefits, **kw)`.
+- Templates: the `<h1>Customize your salary</h1>` heading is removed from `salary_package`; the
+  "define a signature template" `alert-danger` became an `alert-info d-flex` "No PDF templates" alert
+  (`invisible="has_any_template or sign_template_id"`); `#hr_cs_submit` in `salary_package_next_step_button`
+  now has `t-if="resume_line_count"`. Extend that `t-if` with an attribute xpath instead of replacing
+  the button.
 
 ---
 
