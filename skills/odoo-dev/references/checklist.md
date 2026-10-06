@@ -123,6 +123,8 @@ Run this before returning any code. Every item is a real bug or a real review bl
 - [ ] SCSS: no hard-coded neutral colours — `$o-view-background-color`, `$o-gray-*`,
       `$o-main-text-color`; own colours that need a dark shade hold both values via
       `if($o-webclient-color-scheme == dark, dark, light)` (`owl.md` → Dark mode)
+- [ ] `web.dark_mode_variables` `before` targets live in `web._assets_primary_variables`,
+      not `web.assets_backend` (else the lazy dark bundle 500s)
 
 ## Mail / tracking
 

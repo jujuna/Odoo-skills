@@ -72,7 +72,7 @@ if self._has_cycle():
 
 ---
 
-## 2. Security — non-negotiable
+## 2. Security
 
 - Groups in `security/<module>_security.xml`, **first** in manifest `data`
 - Access in `security/ir.access.csv`, **last** in manifest `data`
@@ -89,7 +89,7 @@ if self._has_cycle():
 - No secrets in XML/data files, never log passwords/tokens/keys
 - Portal and public routes: verify ownership, return 404 (not 403) on mismatch
 
-## 3. Multi-company — non-negotiable
+## 3. Multi-company
 
 Every model that stores business data is multi-company until proven otherwise.
 
@@ -102,7 +102,7 @@ Every model that stores business data is multi-company until proven otherwise.
 
 Details, domains and the branch-company (`parent_of`) rules: `multicompany.md`.
 
-## 4. Dependency safety — non-negotiable
+## 4. Dependency safety
 
 Before changing anything that already exists (a core method, a core field, a core view, a
 public method of ours), run the sweep in `dependencies.md` and state the result in the
@@ -226,7 +226,8 @@ type='json'                          → type='jsonrpc'
 useState() / reactive()              → proxy()
 static props / static defaultProps   → props = useProps(schema)  (static form throws)
 useRef("x") / ref.el / t-ref="x"     → signal.ref() / this.x() / t-ref="this.x"
-useExternalListener()                → useListener() from @odoo/owl
+useExternalListener()                → useListener() from @odoo/owl (attaches in setup:
+                                       guard state that onWillStart loads)
 useEffect(fn, deps)  (OWL 2 style)   → useLayoutEffect(fn, () => deps) from @web/owl2/utils
 icon="fa-x" / class="fa fa-x"        → icon="name" / class="oi" data-icon="name"
 xpath "//t[@t-component='props.X']"  → copy the v20 attribute: 'this.props.X'
@@ -251,4 +252,5 @@ ir.config_parameter.get_param()      → get_str() / get_bool() / get_int() / ge
 ir.config_parameter.set_param()      → set_str() / set_bool() / set_int() / set_float()
 SELF_WRITEABLE_FIELDS (res.users)    → user_writeable=True on the field
 SELECT ... FOR UPDATE (raw)          → lock_for_update() / try_lock_for_update()
+import pytz                          → from zoneinfo import ZoneInfo  (pytz is not a v20 dependency)
 ```

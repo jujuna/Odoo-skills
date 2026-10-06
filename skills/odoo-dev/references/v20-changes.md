@@ -269,13 +269,20 @@ reactivity model, not a version bump. See `owl.md` for the working rules.
 | `useEffect(fn, deps)` | `useLayoutEffect(fn, () => deps)` from `@web/owl2/utils`. `@odoo/owl` still exports a `useEffect(fn)`, but it is a new one-argument reactive effect — a deps argument is silently ignored |
 | `useEnv`, `useSubEnv`, `onWillRender` | from `@web/owl2/utils` — its **only** exports are these three plus `render` and `useLayoutEffect` ([owl2/utils.js](../../../../addons/web/static/src/owl2/utils.js)) |
 | `useRef("x")` + `t-ref="x"` + `ref.el` | `x = signal.ref()` + `t-ref="this.x"` + `this.x()` — `.el` is `undefined`, no error |
-| `useExternalListener(target, ev, fn)` | `useListener(target, ev, fn)` from `@odoo/owl` (351 core uses) |
+| `useExternalListener(target, ev, fn)` | `useListener(target, ev, fn)` from `@odoo/owl` (351 core uses). **Not a pure rename:** a window/document listener is attached in `setup()` and removed on destroy ([owl.js:1723](../../../../addons/web/static/lib/owl/owl.js#L1723)); OWL 2 attached it on mount. It can fire before `onWillStart` finishes — see the form crash below |
 | `useComponent`, `useChildSubEnv`, `onRendered` | gone — no export anywhere, 0 imports in core |
 | `t-esc` | `t-out` |
 | `t-slot` | `t-call-slot` |
 | `t-portal` | `t-custom-portal` |
 | `t-ref`, `t-model` | directive names unchanged (core: `t-ref` 887, `t-custom-ref` 0; `t-model` 29) — only the `t-ref` value changed |
 | implicit `this` in templates | explicit `this.props.x`, `this.state.x` |
+
+**Core bug this causes (verified 2026-10-06, still in origin/20.0):** a form view's model
+has `root === undefined` during its first load ([relational_model.js:324](../../../../addons/web/static/src/model/relational_model/relational_model.js#L324)),
+but its `visibilitychange` listener is already live. Any tab hide/show while a new form is
+loading throws `can't access property "activeFields", root is undefined` from
+[form_controller.js:552](../../../../addons/web/static/src/views/form/form_controller.js#L552). Commit `b56fbcba4237` (useListener)
+guarded `beforeUnload` only; `b191e73d9897` (x2many autosave fix) added the unguarded read.
 
 Importing a name `@odoo/owl` no longer exports does not fail the bundle — the binding is
 `undefined` and the component throws when `setup()` calls it. Full export list and the
@@ -306,6 +313,12 @@ New core primitives: `computed`, `signal`, `t`, `useProps`, `useOnChange`, plugi
   labelled "Scope" in the UI; disjoint-group validation is stricter.
 - **UoM has no `rounding` field** — round quantities with
   `precision_digits=env['decimal.precision'].precision_get('Product Unit')`.
+- **Sign: `sign.completed.document` is gone.** Completed PDFs are now `ir.attachment` records on
+  `sign.request.completed_document_attachment_ids` ([sign_request.py:85](../../../../enterprise/sign/models/sign_request.py#L85)),
+  built by `sign.request._generate_completed_documents()` → `sign.request.document._finalize_documents()`
+  ([sign_request_document.py:151](../../../../enterprise/sign/models/sign_request_document.py#L151)). A leftover
+  `_inherit = 'sign.completed.document'` stops the registry ("Model 'sign.completed.document' does not exist in
+  registry") and aborts the whole `-i` run. Found in `id_ge_sign` (2026-10-02).
 - **Binary fields hold `BinaryValue` objects, not base64** (`odoo.tools.binary`). Writing `bytes` raises
   `TypeError: <field>: use BinaryValue instead of bytes` ([fields_binary.py:112](../../../../odoo/orm/fields_binary.py#L112));
   a `str` is still accepted and decoded as base64 (RPC input). Write `BinaryBytes(raw)` (`from odoo.tools import BinaryBytes`):
@@ -503,7 +516,12 @@ core maps `generic_work_entry_type_attendance` to BASIC (`data/hr_work_entry_typ
 now `category_ids=[(5, 0, 0)]` with `result = payslip._get_basic_salary()` and
 `if not categories['BASIC']: categories['BASIC'] = result`. A v19 BASIC rule that keeps category BASIC
 counts attendance twice in GROSS; a paid work entry type without a category is shown on the BASIC
-line but missing from GROSS.
+line but missing from GROSS. A rule that sets `categories['BASIC']` in its code loses that on a **line edit**:
+core forces the edited line and every line before it (`_recompute_with_forced_lines`, context
+`force_payslip_line_overrides`, [hr_payslip.py:787-806](../../../../enterprise/hr_payroll/models/hr_payslip.py#L787)) and skips a
+forced line's code, so GROSS and NET keep the attendance pre-fill: an edited BASIC changes nothing below it. Set the
+category from the forced total in a `_get_localdict` override (geo_payroll `hr_payslip.py`), as core's own test
+`test_payslip_manual_line_edit_and_compute` expects NET to move.
 
 **One payslip spans several versions.** `_compute_worked_days_line_ids` adds every version with the same
 `(employee, contract_date_start, contract_date_end)` ([hr_version.py:653](../../../../enterprise/hr_payroll/models/hr_version.py#L653))
@@ -666,7 +684,7 @@ Still correct in v20, despite churn elsewhere:
 
 ---
 
-## 14. Found in the documentation review (2026-09-24)
+## 14. Stock, accounting, HR and platform changes (verified 2026-09-24)
 
 Each item was verified in the 20.0 source while `documentations/` was reviewed. Paths are relative to this file.
 
@@ -675,6 +693,9 @@ Each item was verified in the 20.0 source while `documentations/` was reviewed. 
 | v19 | v20 | Bites |
 |---|---|---|
 | `stock.scrap` model | removed (commit `1c7d80a10b5d`): a scrap is a `stock.move` with `is_scrap` ([stock_move.py:139](../../../../addons/stock/models/stock_move.py#L139)), posted by `_action_scrap()` ([:2961](../../../../addons/stock/models/stock_move.py#L2961)); new fields `scrap_reason_tag_ids`, `should_replenish_scrapped` | `_inherit = 'stock.scrap'` stops the registry. Kits cannot be scrapped: the scrap form's product domain has `is_kits = False` ([mrp stock_move_views.xml:81](../../../../addons/mrp/views/stock_move_views.xml#L81)) |
+| `stock.return.picking` wizard (`stock/wizard/stock_picking_return.py`) | removed (commit `36b4a0f5fb2b`): **Return** calls `stock.picking._create_return()`, which builds a draft return transfer with every line at 0 ([stock_picking.py:976](../../../../addons/stock/models/stock_picking.py#L976)); Return All / Clear / Exchange are picking buttons ([:823](../../../../addons/stock/models/stock_picking.py#L823), [:843](../../../../addons/stock/models/stock_picking.py#L843)). Override `_prepare_return_move_default_values()` / `_prepare_return_picking_default_values()` | code creating `stock.return.picking` or inheriting its view fails |
+| `to_refund` on the return wizard line (debug column) | only `stock.move.to_refund` (default True, copied, [stock_account stock_move.py:27](../../../../addons/stock_account/models/stock_move.py#L27)); no view shows it | every return lowers Delivered / Received; "return without updating the SO/PO" needs code |
+| `stock.picking._create_backorder(self, backorder_moves=None)` | `_create_backorder(self, backorder_moves=None, from_manual_backorder=False)` ([stock_picking.py:1397](../../../../addons/stock/models/stock_picking.py#L1397)); **Split** passes the flag by keyword ([:1260](../../../../addons/stock/models/stock_picking.py#L1260)), enterprise `quality_control` passes it positionally ([stock_picking.py:98](../../../../enterprise/quality_control/models/stock_picking.py#L98)) | an override with the v19 signature makes Split raise `TypeError` (verified with `rs_waybill`, 2026-09-25); with `quality_control` above it in the MRO every backorder would raise too (read from the signatures, not run). Override with the full v20 signature and forward both arguments |
 | `stock.move.location_final_id` | `forecasted_location_id` ([stock_move.py:86](../../../../addons/stock/models/stock_move.py#L86)) | reads and domains on the old name fail |
 | module `stock_picking_batch`, setting `module_stock_picking_batch` | merged into `stock`; setting `group_stock_picking_batch` ([res_config_settings.py:19](../../../../addons/stock/models/res_config_settings.py#L19)) | `depends` on the module fails |
 | `stock.rule._run_push()` | removed; push rules are applied per move by `stock.move._push_apply()` ([stock_move.py:1270](../../../../addons/stock/models/stock_move.py#L1270)) | overrides are never called |
@@ -716,6 +737,11 @@ Each item was verified in the 20.0 source while `documentations/` was reviewed. 
   [res_partner.py:8](../../../../addons/l10n_uz/models/res_partner.py#L8)); `l10n_ge` does not, so a Georgian individual whose
   11-digit personal number is in Tax ID is a company. Code that branches on `is_company` (name splitting, person-only fields)
   misreads such contacts. Proven on a scratch DB, 2026-09-24 (`gec_income_tax_report` split "ნუცა თორაძე" as a company).
+- **`account.report._get_lines()` returns data objects, not dicts** (commit `97e30819341` "[IMP] account_reports: dictalypse"):
+  `AccountReportLineData` / `AccountReportColumnData` ([report_data_objects.py:79](../../../../enterprise/account_reports/utils/report_data_objects.py#L79)).
+  `line['columns']` still works through a shim that logs "Use of slow __getitem__" ([:15](../../../../enterprise/account_reports/utils/report_data_objects.py#L15));
+  `column.get('no_format')` raises `AttributeError`. Read `line.code`, `line.columns`, `col.expression_label`, `col.no_format`.
+  v19 had no `report_data_objects.py`. Proven on a scratch DB, 2026-10-02.
 - `l10n_account_withholding_tax`: when the register-payment wizard will create one payment per bill (no Group Payments),
   the withholding lines are not offered ([account_payment_register.py:151](../../../../addons/l10n_account_withholding_tax/wizards/account_payment_register.py#L151)).
 - `l10n_ge` as shipped: "Georgia (VAT Registered)" means "the contact has a Tax ID" (`has_vat`, [partner.py:924](../../../../addons/account/models/partner.py#L924)),
@@ -774,8 +800,14 @@ Each item was verified in the 20.0 source while `documentations/` was reviewed. 
   completion runs `_finalize_documents()` ([sign_request_document.py:151](../../../../enterprise/sign/models/sign_request_document.py#L151));
   roles can require an external signature (`requires_external_signature`, [sign_item_role.py:44](../../../../enterprise/sign/models/sign_item_role.py#L44)).
   A module inheriting `sign.completed.document` (our `id_ge_sign`) does not load.
+- **`pytz` is not an Odoo dependency any more** (verified 2026-10-03). v19 listed it in `requirements.txt`
+  (`git show 19.0:requirements.txt`, line 80) and 92 core files imported it; v20 imports it nowhere and uses the
+  standard library's `zoneinfo` ([misc.py:34](../../../../odoo/tools/misc.py#L34)). It is still installed on Python
+  3.12 only because the pinned `Babel==2.10.3` and `zeep` require it; with Babel 2.17 (Python 3.13/3.14) and no
+  zeep, `import pytz` fails when the module loads. Use `ZoneInfo('Asia/Tbilisi')` and
+  `value.replace(tzinfo=timezone.utc)` (tbc_bank `_to_tbc_local`); `bsc_strategy` still imports pytz.
 
-## 15. Found in end-to-end payroll scenarios (2026-09-24, fresh DB, dropped after)
+## 15. Payroll: work entries, payslip entries and payments (verified 2026-09-24)
 
 - **No `hr.work.entry` model any more** (`'hr.work.entry' not in env`; v19 had `hr_work_entry/models/hr_work_entry.py`).
   Worked days come from the calendar at compute time; `generate_work_entries()` only builds values.
@@ -798,3 +830,52 @@ Each item was verified in the 20.0 source while `documentations/` was reviewed. 
   ... has not properly configured the default Account!" without it ([hr_payroll_account hr_payslip.py:260](../../../../enterprise/hr_payroll_account/models/hr_payslip.py#L260)).
   Rules computed on unrounded categories hit it on prorated wages (952.38 base: 19.05 + 186.67 + 746.67 = 952.39).
   Localizations pass `default_account=` to `_configure_payroll_account` (AU, AE, BE, HK).
+
+## 16. Payroll: reset, cancel, inputs and pay-run validation (verified 2026-09-25)
+
+- **A reset recomputes the lines, not the inputs.** Core `write` refreshes a slip whose state goes back to draft
+  ([hr_payslip.py:696](../../../../enterprise/hr_payroll/models/hr_payslip.py#L696), :781, `action_refresh_from_work_entries` :1326-1335), but
+  `_compute_input_line_ids` depends only on employee, version, structure and dates (:337-338). Inputs injected from other records
+  (benefits, attachments you manage yourself) stay as they were while the slip sat validated or cancelled, and Validate does not
+  recompute. Mark them in an `action_refresh_from_work_entries` override *before* `super()`; marking after the refresh leaves lines
+  built from the old inputs (a changed deduction paid at the old amount, a once-bonus another slip took paid twice).
+- **Core Cancel keeps a reversed entry linked.** hr_payroll_account's `action_payslip_cancel` calls `_unlink_or_reverse()`
+  ([hr_payslip.py:29-32](../../../../enterprise/hr_payroll_account/models/hr_payslip.py#L29)); only a deleted move clears `move_id`. Under a
+  lock date or hash it is reversed, under a restrictive audit trail cancelled, and the slip still points at it; after Set to Draft,
+  validation skips any slip with `move_id` (:55), so no new entry is booked. Release before `super()` and clear `move_id`; unlink
+  (never reverse again) an entry whose `reversal_move_ids` is set or whose state is `cancel`.
+- **`inputs['CODE']` holding several inputs is core's aggregator proxy** ([hr_payslip.py:1671-1675](../../../../enterprise/hr_payroll/models/hr_payslip.py#L1671),
+  :2457-2511): `.amount` sums, `.name` joins, every other field behaves as on a multi-record recordset (a Many2one returns the union,
+  a scalar raises "Expected singleton", wrapped as "Wrong python code"). A helper that follows one input's link must loop over the records.
+- **Pay-run Validate re-sends validated slips.** `hr.payslip.run.action_validate` filters only cancelled and line-less slips
+  ([hr_payslip_run.py:384-386](../../../../enterprise/hr_payroll/models/hr_payslip_run.py#L384)), so `action_payslip_done` also gets the run's
+  already validated ones; a guard written for drafts must filter drafts.
+- **Edited lines are marked.** `hr.payslip.line.manually_modified` ([hr_payslip_line.py:58](../../../../enterprise/hr_payroll/models/hr_payslip_line.py#L58))
+  is set on lines the user edited. A check that re-runs `_get_payslip_lines()` to compare with stored lines must replay them through
+  `force_payslip_line_overrides`, or every edit reads as drift.
+
+## 17. Fleet: license plates are unique (verified 2026-09-26)
+
+- **Fleet license plates are unique.** `fleet.vehicle` has `models.Constraint('UNIQUE(license_plate)')`
+  ([fleet_vehicle.py:158](../../../../addons/fleet/models/fleet_vehicle.py#L158), commit `1c8fb57eb5cb`); 19.0 had none. It spans all
+  companies and archived vehicles. Code that found or created a vehicle per driver + plate now raises `UniqueViolation` for a truck
+  shared by two drivers: find by plate alone with `active_test=False` and keep the driver on your own record. Do not do that lookup in
+  an onchange that sets a vehicle when another onchange copies the vehicle's driver: onchanges cascade
+  ([web models.py:2369](../../../../addons/web/models/models.py#L2369)) and overwrite the driver the user picked.
+
+## 18. Invoice line text, VAT and IBAN checks (verified 2026-10-02)
+
+- **`account.move.line.name` is only the product's description now.** v19 `_compute_name` built
+  `product.display_name` + `description_sale` / `description_purchase`; v20 keeps only the description and
+  leaves `name` empty when the product has none ([account_move_line.py:653](../../../../addons/account/models/account_move_line.py#L653)).
+  The product name moved to the new computed `label` field ([account_move_line.py:125](../../../../addons/account/models/account_move_line.py#L125)).
+  `sale.order.line.name` follows the same rule. Code that validates or exports `line.name` (e.g. rs_einvoice's
+  "line(s) have no description" check) refuses every line whose product has no Sales Description: give
+  products a `description_sale`, or read `label`.
+- **`base_vat` and `base_iban` are gone** (`git ls-tree 20.0 addons/base_vat addons/base_iban` is empty; only stale
+  `__pycache__` folders may remain on disk). VAT is always validated on `res.partner` through `_run_vat_checks`
+  ([res_partner.py:1403](../../../../odoo/addons/base/models/res_partner.py#L1403)); Georgia has no checker, so any
+  Tax ID of 3+ characters is stored, and 1-2 characters raise "To explicitly indicate no (valid) VAT, use '/', 'na'
+  or 'NA' instead." (:1426). Context `no_vat_validation=True` stores an invalid foreign VAT (:1453). IBANs are not
+  checked on save: `validate_iban` ([bank_account_number.py:51](../../../../odoo/tools/bank_account_number.py#L51))
+  only decides `account_type` 'iban' vs 'bank' ([res_partner_bank.py:46](../../../../addons/account/models/res_partner_bank.py#L46)).

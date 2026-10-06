@@ -306,3 +306,33 @@ Block manual transaction code unless it answers these questions:
 - Are caches invalidated after commit/rollback/raw SQL writes?
 - Are recomputations scheduled after raw SQL updates to dependency fields?
 - Are locks held for the shortest practical time?
+
+---
+
+## 12. An independent cursor on a row this transaction also writes
+
+Learned on the bank modules (2026-10-02); the shared implementation is
+`custom_addons/gec_odoo_modules/gec_bank/models/gec_bank_service.py` (`_durable_write`,
+`_reserve_send`).
+
+- **After an own-cursor UPDATE of a row commits, this transaction must never UPDATE that row
+  again**, through the ORM or not. Under REPEATABLE READ PostgreSQL answers "could not
+  serialize access due to concurrent update" at flush, Odoo re-runs the whole request, and a
+  request that moved money moves it twice. Put the values in the cache only
+  (`record._update_cache(vals)`), post the tracking message yourself, and never invalidate +
+  re-read: the snapshot predates the commit and returns the old values.
+- **A row this transaction already wrote cannot be claimed durably.** The flushed write holds
+  the row lock, the own cursor waits on it forever. `SET LOCAL lock_timeout = '2s'` on the own
+  cursor and treat the timeout as "refuse", not as "write it here instead" for a money-moving
+  claim. So confirm (post) the payment in an earlier request: `basis_bank` posts draft payments
+  when the OTP dialog opens, and the send request then claims rows it has not written
+  (2026-10-03, proven by a real-cursor probe).
+- **Core's writes count too.** A batch's stored `state` is recomputed from `is_sent`;
+  `action_post`, `mark_as_sent`, `action_cancel` write the payment row. A durable marker on a
+  row core will touch in the same transaction is therefore impossible; it needs a row of its own.
+- **Never name the independent cursor `cr`.** `_()` looks for a local `cr` to guess the
+  language and picks up the closed one ("The cursor is being closed, but starts a new
+  transaction").
+- **Unit tests cannot show any of this.** `registry_test_mode()` makes `registry.cursor()`
+  share the test transaction. Prove it with an `odoo-bin shell` probe on real cursors, as in
+  `Claude outputs/bank_probes/`.

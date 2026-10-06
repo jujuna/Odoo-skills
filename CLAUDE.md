@@ -54,6 +54,9 @@ Whenever Odoo business logic comes up in a session:
 3. Follow `.claude/skills/odoo-dev/references/doc-template.md` format
 4. All links in docs use `../` prefix: `](../addons/...)`
 
+This rule is the standing request for `documentations/`. Where a skill says "no README or
+docs unless asked", it means files inside a module.
+
 ### Documentation philosophy
 - **Goal:** Understand the flow, purpose, and real usage — not catalog every field
 - **Write for someone who wants to learn the module**, not someone grepping for field names

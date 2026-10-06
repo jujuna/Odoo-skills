@@ -37,7 +37,7 @@ by what core does, not by external documentation.
 | `onWillRender` | same name | `@web/owl2/utils` |
 | `useEnv`, `useSubEnv` | same names | `@web/owl2/utils` |
 | `useRef("x")` + `ref.el` | `x = signal.ref()` + `this.x()` | `@odoo/owl` |
-| `useExternalListener(t, ev, fn)` | `useListener(t, ev, fn)` | `@odoo/owl` |
+| `useExternalListener(t, ev, fn)` | `useListener(t, ev, fn)` — attaches in `setup()`, not on mount (section 5) | `@odoo/owl` |
 | `useComponent`, `useChildSubEnv`, `onRendered` | **gone** — 0 imports in core | — |
 | `t-esc` | `t-out` | — |
 | `t-slot="x"` | `t-call-slot="x"` | — |
@@ -222,6 +222,11 @@ setup() {
 - return a cleanup function from the effect; never leave a listener or interval behind
 - `useOnChange` is for "react to a prop changing", `useLayoutEffect` for "sync the DOM"
 - `onWillStart` for the initial async load; do not fetch in `setup()` directly
+- `useListener(window|document, ev, fn)` attaches **immediately in `setup()`** and detaches on
+  destroy ([owl.js:1723](../../../../addons/web/static/lib/owl/owl.js#L1723)); OWL 2 `useExternalListener` attached on
+  mount. The handler can run while `onWillStart` is still loading, so guard what it loads —
+  core does `if (!this.model.root) return;` in [form_controller.js:591](../../../../addons/web/static/src/views/form/form_controller.js#L591).
+  A function target (`() => this.ref()`) attaches only once the element exists.
 
 ---
 
@@ -343,6 +348,13 @@ $my-soft:         if($my-dark, mix(#2563eb, $o-view-background-color, 18%), #eaf
 - `*.dark.scss` in `web.assets_web_dark` (core `account`, `web_enterprise`) is for
   overriding selectors you do not own. For your own stylesheet, one token block is
   easier to keep correct than a parallel file of selectors.
+- `web.dark_mode_variables` with `('before', 'x.variables.scss', 'x.variables.dark.scss')`
+  (core `onboarding`, `documents`): the target **must** be in `web._assets_primary_variables`.
+  `web_enterprise` also includes `web.dark_mode_variables` in `web.assets_backend_lazy_dark`
+  ([web_enterprise manifest:63](../../../../enterprise/web_enterprise/__manifest__.py#L63)), so a
+  target in `web.assets_backend` raises `File(s) ... not found in bundle web.dark_mode_variables`:
+  `/web/bundle/web.assets_backend_lazy_dark` returns 500 and graph/pivot/gantt/grid views break
+  for dark-mode users only (bsc_strategy, 2026-10-06; same on v19).
 - `var(--o-component-background)`, `var(--o-text-color)`, `var(--o-border-color)`,
   `var(--o-text-color-muted)`, `var(--o-brand-primary)`, `var(--o-view-background-color)`,
   `var(--o-main-text-color)` do **not exist** in v20 (`--o-input-background-color` is only
