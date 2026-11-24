@@ -1,4 +1,4 @@
-# Controllers & API — Odoo 19+
+# Controllers & API — Odoo 19
 
 ## Table of Contents
 
@@ -40,7 +40,9 @@ In `__manifest__.py`, no `data` entry is needed — controllers are auto-discove
 | `type='jsonrpc'` | `application/json` | AJAX calls, OWL components, API | No (session auth) |
 | `type='http'` | `text/html` or form data | Web pages, form submissions, downloads | Yes (auto) |
 
-**v19 note:** `type='json'` is a **deprecated alias** for `type='jsonrpc'`. Always use `type='jsonrpc'` in new code.
+**Route types:** `type='jsonrpc'` (418 core usages) and `type='http'`. `type='json'` is a
+deprecated alias (0 core usages) — never write it. `odoo.http` is a single module
+(`odoo/http.py`): import helpers from it directly, e.g. `odoo.http.serialize_exception`.
 
 ---
 
@@ -55,14 +57,7 @@ class MyController(http.Controller):
 
     @http.route('/my_module/get_data', type='jsonrpc', auth='user', methods=['POST'])
     def get_data(self, record_id, **kwargs):
-        """Fetch record data for authenticated users.
-
-        Args:
-            record_id (int): ID of the record to fetch.
-
-        Returns:
-            dict: Record data with name and state.
-        """
+        """Return the record's name and state for an authenticated user."""
         if not isinstance(record_id, int) or record_id <= 0:
             raise ValueError("Invalid record ID")
 
@@ -75,10 +70,12 @@ class MyController(http.Controller):
         }
 ```
 
-### Calling from OWL (frontend):
+### Calling from OWL 2 (frontend):
 ```javascript
-// Using RPC service
-const result = await this.rpc("/my_module/get_data", { record_id: 42 });
+import { rpc } from "@web/core/network/rpc";
+
+// Direct JSON-RPC call (no `rpc` service in Odoo 19)
+const result = await rpc("/my_module/get_data", { record_id: 42 });
 
 // Using ORM service (preferred for standard CRUD)
 const records = await this.orm.searchRead("my.model", domain, fields);
@@ -141,22 +138,38 @@ return request.make_response(
 
 ## 5. JSON-2 External API
 
-Odoo 19's primary external API. Endpoints follow `/json/2/<model>/<method>`.
+The external API. Endpoints follow `/json/2/<model>/<method>`.
 
-### Authentication:
+Served by the `rpc` module (auto-installed), which also provides `/xmlrpc` and `/jsonrpc` —
+[addons/rpc/controllers/json2.py:49](../../../../addons/rpc/controllers/json2.py#L49).
+
 ```bash
-# API key in header
 curl -X POST https://myodoo.com/json/2/res.partner/search_read \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{"params": {"domain": [["is_company", "=", true]], "fields": ["name", "email"], "limit": 10}}'
+  -d '{"domain": [["is_company", "=", true]], "fields": ["name", "email"], "limit": 10}'
 ```
 
-### Key points:
-- API key duration is group-driven (`res.groups.api_key_duration`), not global
-- All standard ORM methods are accessible: `search_read`, `create`, `write`, `unlink`, `call`
-- Security rules (ACLs + record rules) apply normally based on the API key's user
-- Use `search_read` instead of separate `search` + `read` for efficiency
+### The contract, exactly
+
+- `POST` only, `auth='bearer'` — the key is checked against `res.users.apikeys` with
+  scope `rpc`, which in practice means a global key (scope empty)
+  ([ir_http.py:235](../../../../odoo/addons/base/models/ir_http.py#L235))
+- the body is a **flat JSON object of keyword arguments** — not wrapped in `{"params": ...}`
+  like JSON-RPC
+- two reserved keys: `ids` (the recordset to call the method on) and `context`
+- everything else is bound to the method signature; a mismatch returns 422
+- the response is the **raw result**, not a JSON-RPC envelope
+- a recordset result is returned as a list of ids
+- multi-database servers need an `X-odoo-database` header
+- only **public** methods are callable — resolved through `odoo.service.model.get_public_method()`, so
+  anything starting with `_` or decorated `@api.private` is a 404
+- calling an `@api.model` method with `ids` is a 422
+- access rights (`ir.model.access`) and record rules (`ir.rule`) apply as the API key's
+  user, including multi-company rules
+
+### Key duration
+Group-driven via `res.groups.api_key_duration` (days), not a global setting.
 
 ### Creating API-friendly methods on models:
 ```python
@@ -166,18 +179,7 @@ class MyModel(models.Model):
 
     @api.model
     def api_get_dashboard_data(self, date_from=None, date_to=None):
-        """Public API method for dashboard data.
-
-        Designed for external consumption via JSON-2 API.
-        Validates parameters and returns a serializable dict.
-
-        Args:
-            date_from (str, optional): Start date (YYYY-MM-DD).
-            date_to (str, optional): End date (YYYY-MM-DD).
-
-        Returns:
-            dict: Dashboard statistics.
-        """
+        """Dashboard data for external callers (JSON-2 API); dates are YYYY-MM-DD."""
         domain = []
         if date_from:
             domain.append(('date', '>=', date_from))
@@ -269,18 +271,19 @@ def public_page(self, **kwargs):
     # request.env.user is the public user if not logged in
     ...
 
-# Webhook with no auth — validate manually
-@http.route('/my_module/webhook', type='http', auth='none', csrf=False, methods=['POST'])
+# Webhook reading DB config — MUST use auth='public' (auth='none' has no request.env!)
+@http.route('/my_module/webhook', type='http', auth='public', csrf=False, methods=['POST'])
 def webhook(self, **post):
     """External webhook receiver.
 
     csrf=False required because external services can't provide CSRF token.
+    Use auth='public' whenever request.env is needed; auth='none' has no DB/env.
     Must validate request authenticity via shared secret.
     """
     import hmac
     secret = post.get('secret', '')
     expected = request.env['ir.config_parameter'].sudo().get_param('my_module.webhook_secret', '')
-    if not hmac.compare_digest(secret, expected):
+    if not expected or not hmac.compare_digest(secret, expected):
         raise Forbidden()
     ...
 ```
@@ -294,12 +297,7 @@ Always validate inputs before processing. Never trust client data.
 ```python
 @http.route('/my_module/update', type='jsonrpc', auth='user', methods=['POST'])
 def update_record(self, record_id, values, **kwargs):
-    """Update a record with validated input.
-
-    Args:
-        record_id (int): Record to update.
-        values (dict): Fields to update.
-    """
+    """Update a record with validated input."""
     # Type validation
     if not isinstance(record_id, int) or record_id <= 0:
         raise ValueError("Invalid record ID")
@@ -327,18 +325,13 @@ def update_record(self, record_id, values, **kwargs):
 ```python
 @http.route('/my_module/upload', type='http', auth='user', methods=['POST'])
 def upload_file(self, file, record_id, **kwargs):
-    """Handle file upload and attach to record.
-
-    Args:
-        file: Uploaded file object.
-        record_id: Target record ID.
-    """
+    """Attach an uploaded file to the record."""
     record = request.env['my.model'].browse(int(record_id))
     record.check_access('write')
 
     attachment = request.env['ir.attachment'].create({
         'name': file.filename,
-        'datas': base64.b64encode(file.read()),
+        'raw': file.read(),
         'res_model': 'my.model',
         'res_id': record.id,
     })
@@ -356,11 +349,13 @@ def download_report(self, record_id, **kwargs):
     pdf_content, _ = request.env['ir.actions.report']._render_qweb_pdf(
         'my_module.action_report_my_model', [record_id]
     )
+    from odoo.http import content_disposition
+
     return request.make_response(
         pdf_content,
         headers=[
             ('Content-Type', 'application/pdf'),
-            ('Content-Disposition', f'attachment; filename="{record.name}.pdf"'),
+            ('Content-Disposition', content_disposition(f'{record.name}.pdf')),
         ],
     )
 ```
@@ -397,7 +392,7 @@ class WebsiteSaleCustom(WebsiteSale):
 
 ### DO NOT use `type='json'` in new code:
 ```python
-# WRONG (deprecated alias in v19)
+# WRONG (deprecated alias)
 @http.route('/api/data', type='json', auth='user')
 
 # CORRECT
@@ -428,8 +423,8 @@ def update(self, record_id, name=None, description=None, **kwargs):
 def action(self, **post):
     ...  # No verification at all
 
-# CORRECT — validate via secret/signature
-@http.route('/webhook', type='http', auth='none', csrf=False, methods=['POST'])
+# CORRECT — validate via secret/signature (use auth='public' if reading request.env)
+@http.route('/webhook', type='http', auth='public', csrf=False, methods=['POST'])
 def webhook(self, **post):
     if not self._verify_webhook_signature(post):
         raise Forbidden()

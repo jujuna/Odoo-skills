@@ -1,4 +1,4 @@
-# Wizards (TransientModel) — Odoo 19+
+# Wizards (TransientModel) — Odoo 19
 
 ## Table of Contents
 
@@ -31,9 +31,11 @@ class MyWizard(models.TransientModel):
 **Key differences from `Model`:**
 - No permanent DB storage — auto-cleaned by `_transient_vacuum()`
 - No `mail.thread` or `mail.activity.mixin` — not needed
-- No record rules needed (each user sees only their own transient records)
-- ACL is still required in `ir.model.access.csv`
 - No `active` field, no archiving
+- **Access is exactly the same as a regular model.** A `TransientModel` does *not*
+  auto-filter by `create_uid` — the class docstring says it "uses the same access rights
+  mechanisms as a regular Model". Without rows in `security/ir.model.access.csv`, nobody can
+  open the wizard; without an ownership `ir.rule`, one user can read another user's wizard record.
 
 ---
 
@@ -41,6 +43,10 @@ class MyWizard(models.TransientModel):
 
 ### Python model:
 ```python
+from odoo import Command, _, api, fields, models
+from odoo.exceptions import UserError
+
+
 class MassConfirmWizard(models.TransientModel):
     """Wizard to confirm multiple records at once."""
 
@@ -62,7 +68,7 @@ class MassConfirmWizard(models.TransientModel):
             records = self.env['my.model'].browse(active_ids).filtered(
                 lambda r: r.state == 'draft'
             )
-            defaults['record_ids'] = records.ids
+            defaults['record_ids'] = [Command.set(records.ids)]
         return defaults
 
     def action_confirm(self):
@@ -143,10 +149,9 @@ class ImportWizard(models.TransientModel):
     def action_parse(self):
         """Parse uploaded file and show preview."""
         self.ensure_one()
-        data = base64.b64decode(self.file)
+        data = base64.b64decode(self.file)  # Binary fields hold base64
         lines = self._parse_file(data)
-        self.line_ids = [(5, 0, 0)]  # clear existing
-        self.line_ids = [(0, 0, vals) for vals in lines]
+        self.line_ids = [Command.clear()] + [Command.create(vals) for vals in lines]
         # Return the same wizard to show parsed lines
         return {
             'type': 'ir.actions.act_window',
@@ -308,6 +313,16 @@ class SetupWizard(models.TransientModel):
 ```
 
 ### Using `default_get()`:
+
+An x2many value set **after** `super().default_get()` must already be commands
+(`[Command.set(ids)]`, as `addons/account/wizard/account_merge_wizard.py` does): core
+normalizes only the defaults it computes itself. A bare id list crashes the form when it shows
+the field as a list: the web client's first `onchange` loops over the value as commands
+(`addons/web/models/models.py`, "retrieve all line ids in commands") and raises
+`TypeError: 'int' object is not subscriptable`. Tests that `create()` the wizard, and even
+`odoo.tests.Form` (it sends sub-field specs only for one2many), never reach that loop
+([web models.py:2062](../../../../addons/web/models/models.py#L2062)).
+
 ```python
 @api.model
 def default_get(self, fields_list):
@@ -390,18 +405,33 @@ return {
 
 ## 7. Wizard Security
 
-### ACL (required):
+### `security/ir.model.access.csv` (required):
 ```csv
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_my_wizard_user,my.module.wizard.user,model_my_module_wizard,group_my_module_user,1,1,1,1
+access_my_wizard_line_user,my.module.wizard.line.user,model_my_module_wizard_line,group_my_module_user,1,1,1,1
+```
+
+### Ownership rule (`security/ir_rules.xml`):
+```xml
+<record id="my_wizard_own_rule" model="ir.rule">
+    <field name="name">My Wizard: own records only</field>
+    <field name="model_id" ref="model_my_module_wizard"/>
+    <field name="domain_force">[('create_uid', '=', user.id)]</field>
+</record>
 ```
 
 ### Key rules:
-- Always add ACL for wizard models — even though they're transient
-- No record rules needed — TransientModel auto-filters by `create_uid`
-- Wizard line models also need ACL entries
-- Use `groups=` on the binding action or button to restrict who can open it
-- Validate permissions inside the wizard action method — don't assume the button group is enough
+- Always add access rows for wizard models — transient does not mean unprotected
+- **Add the ownership rule** `[('create_uid', '=', user.id)]` as a global `ir.rule` (no
+  `groups`), as core does for `sale.advance.payment.inv`
+  ([sale ir_rules.xml:175](../../../../addons/sale/security/ir_rules.xml#L175)); the ORM does
+  not do it for you
+- Wizard line models need their own access rows, and a rule
+  `[('wizard_id.create_uid', '=', user.id)]` when the lines hold data worth hiding
+- Use `groups=` on the binding action or the button to restrict who can open it
+- Validate permissions inside the wizard's `action_*` method — the button's group is a UI
+  hint, not a security boundary
 
 ---
 

@@ -1,4 +1,4 @@
-# Transaction, Commit, Savepoint, and Cache Safety — Odoo 19+
+# Transaction, Commit, Savepoint, and Cache Safety — Odoo 19
 
 Use this whenever code touches `cr.commit()`, `cr.rollback()`, savepoints, raw SQL writes,
 external side effects, cron chunking, queue jobs, imports, or cache invalidation.
@@ -178,6 +178,11 @@ def _sync_to_provider(self):
 - Store provider references immediately after successful responses.
 - If provider confirms success but local write fails, next retry must query/reconcile, not create duplicates.
 - Do not commit in an interactive button unless the button's contract clearly says it performs durable external submission.
+- Without a commit, put the irreversible call **last** and run `self.env.cr.flush()` right before it, not
+  `env.flush_all()`: `cr.flush()` also runs the precommit hooks (mail tracking), so only COMMIT itself can still fail
+  after the call ([sql_db.py:176-186](../../../../odoo/sql_db.py#L176); core:
+  `addons/account_peppol/models/account_edi_proxy_user.py:119`). A request is re-run after a serialization failure
+  (`retrying()` in `odoo/service/model.py:160`), so nothing irreversible may happen before the writes are flushed.
 
 ---
 
@@ -242,11 +247,31 @@ for tx in transactions:
 - Catch database operational errors separately from business errors.
 - A rollback also discards all uncommitted work from other code using the same cursor.
 
+### Log, then raise — the log is rolled back too
+
+`message_post()`, a log-model `create()` or any write made just before `raise UserError(...)`
+disappears with the transaction. When the failure itself must stay visible (an external
+system refused a document), write the trace in its own cursor, then raise. Core precedent
+(`ir.logging` row "to avoid rollback that could be caused by an upper method",
+[delivery/models/delivery_carrier.py:368-383](../../../../addons/delivery/models/delivery_carrier.py#L368)):
+
+```python
+with self.env.registry.cursor() as log_cr:
+    log_env = self.env(cr=log_cr, user=SUPERUSER_ID)
+    log_env['account.move'].browse(move_ids)._message_log_batch(bodies=bodies)
+raise UserError(error_message)
+```
+
+The separate cursor commits when the `with` block ends without error
+([odoo/sql_db.py:240-245](../../../../odoo/sql_db.py#L240)). Only insert new rows there (messages,
+log lines): updating a row the main transaction already changed waits on that transaction's
+own lock and hangs the request.
+
 ---
 
 ## 10. Row Locking for Concurrency
 
-When two transactions may modify the same rows (worker queues, sequence gaps, inventory reservations, "process exactly once" flows), take an explicit write-lock instead of hand-writing `SELECT ... FOR UPDATE`. v19 exposes two ORM methods on every recordset.
+When two transactions may modify the same rows (worker queues, sequence gaps, inventory reservations, "process exactly once" flows), take an explicit write-lock instead of hand-writing `SELECT ... FOR UPDATE`. The ORM exposes two methods on every recordset.
 
 ```python
 from odoo.exceptions import LockError
@@ -271,6 +296,14 @@ Both use `SKIP LOCKED` (not `NOWAIT`), so a contended row does not abort the tra
 - Take the lock before reading the values your write depends on, so no other transaction can change them between your read and your write.
 - Lock inside the transaction that performs the write; never hold a lock across an external API call or a sleep.
 - Prefer a database `models.Constraint(...)` for plain uniqueness; reach for row locks only when the invariant needs read-then-write atomicity.
+- Lock the parent **first**, then create its children, and use `allow_referencing=True` unless you change the parent's key.
+  A plain `FOR UPDATE` blocks the `FOR KEY SHARE` lock PostgreSQL takes for every INSERT whose FK points at that row, so a
+  second run waits at its `child.create()` until the first commits, then runs again — the "busy" branch never fires; if
+  both insert before locking, both see the other's KEY SHARE and both return busy. Core:
+  `server.try_lock_for_update(allow_referencing=True)` ([fetchmail.py:276](../../../../addons/mail/models/fetchmail.py#L276)).
+- A cron that processes several independent records (hotels, companies, mail servers) commits per record with
+  `self.env['ir.cron']._commit_progress(...)` ([ir_cron.py:846](../../../../odoo/addons/base/models/ir_cron.py#L846)), so a
+  lock is not held until the last record and a timeout does not lose the finished ones.
 
 ---
 
@@ -287,3 +320,42 @@ Block manual transaction code unless it answers these questions:
 - Are caches invalidated after commit/rollback/raw SQL writes?
 - Are recomputations scheduled after raw SQL updates to dependency fields?
 - Are locks held for the shortest practical time?
+
+---
+
+## 12. An independent cursor on a row this transaction also writes
+
+Learned on the bank modules (2026-10-02); the shared implementation is
+`custom_addons/gec_odoo_modules/gec_bank/models/gec_bank_service.py` (`_durable_write`,
+`_reserve_send`).
+
+- **After an own-cursor UPDATE of a row commits, this transaction must never UPDATE that row
+  again**, through the ORM or not. Under REPEATABLE READ PostgreSQL answers "could not
+  serialize access due to concurrent update" at flush, Odoo re-runs the whole request, and a
+  request that moved money moves it twice. Put the values in the cache only
+  (`record._update_cache(vals)`), post the tracking message yourself, and never invalidate +
+  re-read: the snapshot predates the commit and returns the old values.
+- **A row this transaction already wrote cannot be claimed durably.** The flushed write holds
+  the row lock, the own cursor waits on it forever. `SET LOCAL lock_timeout = '2s'` on the own
+  cursor and treat the timeout as "refuse", not as "write it here instead" for a money-moving
+  claim. So confirm (post) the payment in an earlier request: `basis_bank` posts draft payments
+  when the OTP dialog opens, and the send request then claims rows it has not written
+  (2026-10-03, proven by a real-cursor probe).
+- **Core's writes count too.** A batch's stored `state` is recomputed from `is_sent`;
+  `action_post`, `mark_as_sent`, `action_cancel` write the payment row. A durable marker on a
+  row core will touch in the same transaction is therefore impossible; it needs a row of its own.
+- **Never name the independent cursor `cr`.** `_()` looks for a local `cr` to guess the
+  language and picks up the closed one ("The cursor is being closed, but starts a new
+  transaction").
+- **Unit tests cannot show any of this.** `registry_test_mode()` makes `registry.cursor()`
+  share the test transaction (`odoo/tests/common.py:795`). Prove it with an `odoo-bin shell` probe on real cursors.
+
+## 13. `cr.cache`: a per-cursor memo that a savepoint rollback clears
+
+`self.env.cr.cache` is the core place for a value repeatable within one request or cron pass (core:
+`account_tax.py` `retrieved_tax_map`). Its docstring in `odoo/sql_db.py` says it "ignores rollbacks and
+savepoints" — in v19 that is wrong: `_FlushingSavepoint.rollback` -> `cr.clear()` -> `Transaction.clear()` ->
+`env.cr.cache.clear()` (`odoo/sql_db.py:137-140`, `odoo/orm/environments.py:600-608`). So a memo stored there (e.g. "login
+checked") survives a whole successful request, but a rolled-back step, including `assertRaises` in a test,
+drops it and the next step recomputes. Tests sharing one class cursor keep each other's memo: reset it where a
+test needs a fresh state (rs_einvoice `tests/common.py` `_patch_rsge`).

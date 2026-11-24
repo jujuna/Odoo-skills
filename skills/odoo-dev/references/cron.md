@@ -1,4 +1,4 @@
-# Scheduled Actions (Cron) — Odoo 19+
+# Scheduled Actions (Cron) — Odoo 19
 
 ## Table of Contents
 
@@ -25,11 +25,10 @@
             <field name="model_id" ref="model_my_model"/>
             <field name="state">code</field>
             <field name="code">model._cron_process_pending()</field>
+            <field name="user_id" ref="base.user_root"/>
             <field name="interval_number">1</field>
             <field name="interval_type">hours</field>
-            <field name="numbercall">-1</field>
             <field name="active" eval="True"/>
-            <field name="doall" eval="False"/>
         </record>
     </data>
 </odoo>
@@ -39,19 +38,25 @@
 
 | Field | Value | Purpose |
 |---|---|---|
-| `interval_number` | integer | How many intervals between runs |
-| `interval_type` | `minutes`, `hours`, `days`, `weeks`, `months` | Interval unit |
-| `numbercall` | `-1` = unlimited, `N` = run N times then deactivate | Execution count |
+| `user_id` | `ref="base.user_root"` in core crons | Scheduler User: the job runs as this user (default: whoever creates the cron) |
+| `interval_number` | integer > 0 | How many intervals between runs |
+| `interval_type` | `minutes`, `hours`, `days`, `weeks`, `months` | Interval unit (default `months`) |
+| `nextcall` | datetime | Next planned run (default: now) |
 | `active` | `True`/`False` | Enable/disable |
-| `doall` | `True`/`False` | If True, run missed executions on restart |
 | `priority` | integer | Lower = runs first (default: 5) |
+
+`numbercall` and `doall` no longer exist on `ir.cron`
+([ir_cron.py:106-122](../../../../odoo/addons/base/models/ir_cron.py#L106)). Putting them in
+the XML fails the install with "Invalid field 'numbercall' in 'ir.cron'"
+([odoo/orm/models.py:4660](../../../../odoo/orm/models.py#L4660)).
 
 ### Rules
 
 - Always wrap in `<data noupdate="1">` — users may change the schedule
 - Use descriptive `name` with module prefix
 - Method must be on the model referenced by `model_id`
-- `doall=False` is safer — prevents flood of missed executions after downtime
+- `noupdate` also freezes `code`: renaming the method later breaks existing databases at run
+  time, because `-u` does not rewrite the stored code. Keep cron method names stable
 
 ---
 
@@ -63,7 +68,7 @@
 def _cron_process_pending(self):
     """Cron: process all pending records.
 
-    Called by ir.cron. Runs as superuser (SUPERUSER_ID).
+    Called by ir.cron as its Scheduler User (user_id).
     """
     records = self.search([('state', '=', 'pending')], limit=500)
     for record in records:
@@ -75,8 +80,19 @@ def _cron_process_pending(self):
 
 ### Key rules
 
-- Cron methods receive NO arguments (called with `model._cron_method()`)
-- Cron runs as `SUPERUSER_ID` — no ACL checks apply
+- The `code` field is Python: arguments are allowed and core uses them
+  (`model._gc_notifications(max_age_days=180)`, [mail/data/ir_cron_data.xml:36](../../../../addons/mail/data/ir_cron_data.xml#L36)).
+  Give each argument a default so the method also runs without them
+- The job runs as its `user_id` ([ir_cron.py:426](../../../../odoo/addons/base/models/ir_cron.py#L426),
+  [:482](../../../../odoo/addons/base/models/ir_cron.py#L482)). With `base.user_root` (uid 1) the env
+  is superuser, so ACLs and company rows do not apply ([odoo/orm/environments.py:66](../../../../odoo/orm/environments.py#L66));
+  with a normal user they do. An admin can change the Scheduler User in the UI, so never rely on
+  either: `sudo()` explicitly where the job needs it, filter companies explicitly
+- `self.env.company` in a cron is the Scheduler User's default company (no
+  `allowed_company_ids` in the context, [environments.py:243](../../../../odoo/orm/environments.py#L243)).
+  A job serving several companies loops over them with `with_company()`
+- Work that must run as a specific user (their credentials, their language) uses
+  `with_user(user)` per user, not the cron's user
 - Always add a `limit` to prevent unbounded processing
 - Always handle exceptions per-record — one failure should not stop the batch
 - Log errors with `_logger.exception()` for traceback
@@ -91,13 +107,7 @@ For full commit rules, load `references/transactions.md`.
 
 ```python
 def _cron_process_large_batch(self):
-    """Process records in chunks with periodic commits.
-
-    Commits after each batch to:
-    - Release DB locks
-    - Save progress (so crashed batches don't re-process)
-    - Free memory
-    """
+    """Process records in chunks, committing each one to release locks and keep progress."""
     batch_size = 200
     while True:
         records = self.search(
@@ -118,10 +128,14 @@ def _cron_process_large_batch(self):
                 record.write({'state': 'error'})
 
         # Commit only when this cron is allowed to create resumable boundaries.
-        if self._can_commit():
+        if self._can_commit():  # module helper, see below
             self.env.cr.commit()
             self.env.invalidate_all()
 ```
+
+`_can_commit()` is not a `BaseModel` method: define it in the module as core does
+(`return not modules.module.current_test`, [account_move.py:7484](../../../../addons/account/models/account_move.py#L7484)),
+so tests never commit.
 
 ### Why commit + invalidate
 
@@ -138,7 +152,11 @@ if self._can_commit():
 
 ## 4. _commit_progress API
 
-Odoo 19 provides `_commit_progress` for long-running cron tasks. It handles commit timing and progress reporting.
+`_commit_progress` handles commit timing and progress reporting for long-running cron tasks.
+In v19 one run keeps calling the job until both `MIN_RUNS_PER_JOB = 10` loops and `MIN_TIME_PER_JOB = 10` seconds have passed
+(or it is done, [ir_cron.py:33-34](../../../../odoo/addons/base/models/ir_cron.py#L33)). A job failing 5 times in a row
+over more than 7 days is deactivated and `_notify_admin()` is called (base only logs a warning,
+[ir_cron.py:571-606](../../../../odoo/addons/base/models/ir_cron.py#L571)).
 
 ```python
 def _cron_send_emails(self):
@@ -147,10 +165,6 @@ def _cron_send_emails(self):
     remaining = len(pending)
 
     for record in pending:
-        # Check if we should continue (respects time limits)
-        if not self.env['ir.cron']._commit_progress(remaining=remaining):
-            break
-
         try:
             record._send_email()
             record.write({'email_sent': True})
@@ -158,10 +172,9 @@ def _cron_send_emails(self):
             _logger.exception("Email send failed for %s", record.id)
 
         remaining -= 1
-        self.env['ir.cron']._commit_progress(
-            processed=1,
-            remaining=remaining,
-        )
+        # One _commit_progress() call per iteration commits and enforces the time budget
+        if not self.env['ir.cron']._commit_progress(processed=1, remaining=remaining):
+            break
 ```
 
 ### _commit_progress benefits
@@ -169,7 +182,12 @@ def _cron_send_emails(self):
 - Automatic periodic commits (no manual `cr.commit()`)
 - Progress visible in cron log
 - Respects `ir.cron` time limits — stops gracefully
-- Returns `False` when time is up — use as loop condition
+- Returns the seconds left (`0` when time is up, falsy) — use as loop condition. With
+  `remaining > 0` the scheduler calls the job again (up to `MIN_RUNS_PER_JOB = 10` loops), then
+  reschedules it ASAP ([ir_cron.py:496-565](../../../../odoo/addons/base/models/ir_cron.py#L496))
+- `_commit_progress(remaining=0, deactivate=True)` switches the job off once it ends fully done:
+  the core way to run a job once (auth_signup [res_users.py:236](../../../../addons/auth_signup/models/res_users.py#L236)).
+  "Run Manually" still works on the inactive job
 
 ---
 

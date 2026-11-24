@@ -1,4 +1,4 @@
-# XML Views & Inheritance — Odoo 19+
+# XML Views & Inheritance — Odoo 19
 
 ## Table of Contents
 
@@ -13,7 +13,8 @@
 9. [QWeb Report Templates](#9-qweb-report-templates)
 10. [Actions & Menus](#10-actions--menus)
 11. [Common Patterns](#11-common-patterns)
-12. [Antipatterns](#12-antipatterns)
+12. [Icons (Font Awesome)](#12-icons-font-awesome)
+13. [Antipatterns](#13-antipatterns)
 
 ---
 
@@ -22,7 +23,7 @@
 | Type | Tag | Purpose |
 |------|-----|---------|
 | Form | `<form>` | Single record editing |
-| List | `<list>` | Multi-record table (v19: `<list>` not `<tree>`) |
+| List | `<list>` | Multi-record table — `<list>`, never `<tree>` |
 | Search | `<search>` | Filters, group-by, search fields |
 | Kanban | `<kanban>` | Card-based view |
 | Calendar | `<calendar>` | Date-based view |
@@ -178,8 +179,8 @@
             <separator/>
             <filter name="filter_archived" string="Archived"
                     domain="[('active', '=', False)]"/>
-            <!-- Group By -->
-            <group expand="0" string="Group By">
+            <!-- Group By: a bare <group>; expand/string fail the search RNG -->
+            <group>
                 <filter name="groupby_state" string="Status"
                         context="{'group_by': 'state'}"/>
                 <filter name="groupby_partner" string="Partner"
@@ -204,6 +205,10 @@
 - Use `date` attribute for date filters — gives automatic period picker
 - `operator="child_of"` on Many2one — searches parent + children
 - `enable_counters="1"` on searchpanel — shows record counts (has perf cost)
+- `<group>` in a search view takes no `expand` or `string`: the search RNG reuses the form
+  `group` definition ([common.rng:295](../../../../odoo/addons/base/rng/common.rng#L295)),
+  and an unknown attribute raises "Invalid view ... definition" on install. Core writes a bare
+  `<group>` ([sale_order_views.xml:955](../../../../addons/sale/views/sale_order_views.xml#L955))
 
 ---
 
@@ -452,7 +457,7 @@ Calendar attributes:
 
 ## 8. Expressions
 
-Odoo 19 uses **expression strings** directly on elements. The old `attrs` dictionary
+Views use **expression strings** directly on elements. The old `attrs` dictionary
 syntax is deprecated.
 
 ### Modern syntax (v17+):
@@ -518,7 +523,7 @@ syntax is deprecated.
             <t t-foreach="docs" t-as="doc">
                 <t t-call="web.external_layout">
                     <div class="page">
-                        <h2><t t-esc="doc.name"/></h2>
+                        <h2><t t-out="doc.name"/></h2>
 
                         <div class="row mb-4">
                             <div class="col-6">
@@ -543,9 +548,9 @@ syntax is deprecated.
                             <tbody>
                                 <t t-foreach="doc.line_ids" t-as="line">
                                     <tr>
-                                        <td><t t-esc="line.product_id.name"/></td>
+                                        <td><t t-out="line.product_id.name"/></td>
                                         <td class="text-end">
-                                            <t t-esc="line.quantity"/>
+                                            <t t-out="line.quantity"/>
                                         </td>
                                         <td class="text-end">
                                             <span t-field="line.price_unit"
@@ -568,13 +573,31 @@ syntax is deprecated.
 ```
 
 ### Report rules:
-- Use `t-esc` for values — never `t-out` with user data (XSS risk)
+- Use `t-out` for values. It escapes by default; only a `Markup` value passes through raw.
+  `t-esc` and `t-raw` still compile to `t-out` but are deprecated: `t-esc` logs a warning in
+  dev mode, `t-raw` always ([ir_qweb.py:2487](../../../../odoo/addons/base/models/ir_qweb.py#L2487)).
+  Core reports still have 100 `t-esc` next to 352 `t-out`; write `t-out` in new code.
 - Use `t-field` for formatted output (respects locale, widget options)
-- Use `t-options='{"widget": "monetary", ...}'` for currency formatting
+- Use `t-options='{"widget": "monetary", "display_currency": doc.currency_id}'` for money
 - Use `t-options='{"widget": "date"}'` for locale-aware dates
-- `web.external_layout` provides company header/footer
+- `web.external_layout` provides the company header/footer
 - `web.html_container` wraps everything for PDF generation
 - `report_type`: `qweb-pdf` for PDF, `qweb-html` for browser preview
+
+### `t-call` parameters
+
+In new code pass values as attributes on the `t-call` (`x="expr"`, `x.f="text"`); they are
+locals of the called template:
+
+```xml
+<t t-call="website.placeholder_header_text_element" _div_class.f="mt-2"/>
+```
+
+Real example: [addons/website/views/website_templates.xml:437](../../../../addons/website/views/website_templates.xml#L437).
+The older form, `t-set` children inside a `t-call` with no other attributes, still works but
+the engine treats it as the deprecated version ([ir_qweb.py:2576](../../../../odoo/addons/base/models/ir_qweb.py#L2576));
+core still has it, e.g. [webclient_templates.xml:103](../../../../addons/web/views/webclient_templates.xml#L103).
+The `t-call` body (minus the `t-set`s) is available in the called template as `t-out="0"`.
 
 ---
 
@@ -688,7 +711,30 @@ syntax is deprecated.
 
 ---
 
-## 12. Antipatterns
+## 12. Icons (Font Awesome)
+
+v19 icons are **Font Awesome 4** (`fa fa-*`, 2369 uses in core XML) plus the Odoo UI set
+(`oi oi-*`, 290 uses). Material Symbols names (`payments`, `open_in_new`) are v20 only.
+
+```xml
+<!-- buttons, stat buttons, searchpanel fields: the fa- or oi- class name -->
+<button name="action_open" type="object" icon="fa-external-link" string="Open"/>
+
+<!-- markup: fa classes, plus a title for screen readers -->
+<i class="fa fa-exclamation-triangle me-1" title="Out of sync"/>
+<i class="fa fa-spinner fa-spin fa-2x" title="Loading"/>
+<i class="oi oi-arrow-right" title="Next"/>
+```
+
+- Button `icon=` starting with `fa-` becomes `fa fa-fw <icon>`, with `oi-` becomes
+  `oi oi-fw <icon>`; anything else is rendered as an `<img src="...">`
+  ([view_button.js:21](../../../../addons/web/static/src/views/view_button/view_button.js#L21)).
+  A v20 name such as `icon="payments"` shows a broken image.
+- Give `<i class="fa ...">` a `title`, `aria-label` or text, as core does.
+
+---
+
+## 13. Antipatterns
 
 ### DO NOT use deprecated `attrs`:
 ```xml

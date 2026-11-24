@@ -1,422 +1,236 @@
-# Module Scaffold — Odoo 19+
+# Module Scaffold — Odoo 19
 
-Complete copy-paste-ready templates for a new Odoo 19 module.
+Copy-paste templates for a new Odoo 19 module. Delete every part the task does not need — an unused
+wizard, controller, or demo file is a cost, not a courtesy.
+
+The code below follows our rules: compact layout (`compact-code.md`), a one-line docstring only
+where it carries a why, multi-company by default, `self.env._()` for user text, and
+`security/ir.model.access.csv` + XML `ir.rule` for security.
 
 ---
 
-## Full Module Layout
+## Layout
+
+Only create the folders you actually use.
 
 ```
 my_module/
 ├── __init__.py
 ├── __manifest__.py
-├── controllers/
-│   ├── __init__.py
-│   └── main.py
 ├── data/
-│   └── sequence_data.xml
-├── demo/
-│   └── demo_data.xml
+│   └── ir_sequence_data.xml
 ├── models/
 │   ├── __init__.py
 │   └── my_model.py
-├── report/
-│   ├── __init__.py
-│   ├── my_model_report.py        (optional: custom report parser)
-│   └── my_model_report_templates.xml
 ├── security/
-│   ├── groups.xml
-│   ├── ir.model.access.csv
-│   └── rules.xml
-├── static/
-│   ├── description/
-│   │   └── icon.png              (module icon, 128x128 or 256x256)
-│   └── src/
-│       ├── components/
-│       │   └── my_component/
-│       │       ├── my_component.js
-│       │       ├── my_component.xml
-│       │       └── my_component.scss
-│       └── scss/
-│           └── my_module.scss
-├── tests/
-│   ├── __init__.py
-│   └── test_my_model.py
+│   ├── my_module_security.xml        # groups, privilege, record rules — FIRST in manifest
+│   └── ir.model.access.csv           # ACLs — right after the groups file
+├── static/description/icon.png       # 128x128 or 256x256
 ├── views/
-│   ├── menu.xml
-│   └── my_model_views.xml
-└── wizards/
+│   ├── my_model_views.xml
+│   └── my_model_menus.xml
+└── wizard/                           # only if there is a wizard (singular, matches core)
     ├── __init__.py
     ├── my_wizard.py
     └── my_wizard_views.xml
 ```
 
-**Note:** `static/description/icon.png` is the module icon shown in the Apps screen. Use 128x128 or 256x256 PNG.
+Add `controllers/`, `report/`, `tests/`, `demo/`, `static/src/` only when the task needs them.
 
 ---
 
-## File: `__manifest__.py`
+## `__manifest__.py`
 
 ```python
 {
-    'name': 'MODULE_TITLE',
+    'name': "MODULE_TITLE",
     'version': '19.0.1.0.0',
     'category': 'CATEGORY',
-    'summary': 'SHORT_SUMMARY',
+    'summary': "SHORT_SUMMARY",
     'description': """
-        LONG_DESCRIPTION
-    """,
-    'author': 'AUTHOR',
-    'website': 'WEBSITE',
+PLAIN_TEXT_DESCRIPTION — two or three sentences, no Markdown.
+Full documentation: README.md and README_DEV.md in the module directory.
+""",
+    'author': "ORGANIZATION_NAME",
     'license': 'LGPL-3',
-    'depends': ['base', 'mail'],
+    'depends': ['mail', 'product'],
     'data': [
-        # Security first
-        'security/groups.xml',
-        'security/ir.model.access.csv',
-        'security/rules.xml',
-        # Data
-        'data/sequence_data.xml',
-        # Views
+        'security/my_module_security.xml',   # groups & record rules first
+        'security/ir.model.access.csv',      # ACLs right after groups
+        'data/ir_sequence_data.xml',
         'views/my_model_views.xml',
-        'views/menu.xml',
+        'views/my_model_menus.xml',          # menus after the actions they reference
     ],
-    'demo': [
-        'demo/demo_data.xml',
-    ],
-    'assets': {},
     'installable': True,
     'application': True,
-    'auto_install': False,
 }
 ```
 
----
-
-## File: `__init__.py`
-
-```python
-from . import controllers
-from . import models
-from . import wizards
-```
+- `name`, `author`, and `license` are mandatory in Odoo 19 (`odoo/modules/module.py`).
+- Never use a `20.0.*` version prefix (uninstallable on Odoo 19). Do not bump `version` on existing modules unless asked.
+- Always set `description` (plain text, no Markdown). Without `description` and without `static/description/index.html`, Odoo parses `README.md` as reStructuredText (`odoo/addons/base/models/ir_module.py`), logging docutils errors on every update.
+- Depend on the smallest modules whose features you actually use (here `mail` and `product`; `base` is implicit).
+- `'application': True` only if the module deserves its own Apps tile.
 
 ---
 
-## File: `models/__init__.py`
+## `models/my_model.py`
 
 ```python
-from . import my_model
-```
-
----
-
-## File: `models/my_model.py`
-
-```python
-import logging
-
-from odoo import api, fields, models, _
+from odoo import api, fields, models
 from odoo.exceptions import UserError, ValidationError
-from odoo.tools import float_compare, float_is_zero
-
-_logger = logging.getLogger(__name__)
 
 
 class MyModel(models.Model):
-    """Main model for MODULE_TITLE.
-
-    Manages the lifecycle of [DESCRIPTION] from draft to completion.
-    Supports mail thread for communication tracking.
-    """
-
     _name = 'my.module.model'
-    _description = 'My Model'
+    _description = "My Model"
     _inherit = ['mail.thread', 'mail.activity.mixin']
-    _order = 'create_date desc, name'
+    _order = 'date desc, id desc'
+    _check_company_auto = True
 
-    # --- Default methods ---
-    @api.model
-    def _default_company_id(self):
-        """Return the current user's company as default."""
-        return self.env.company
+    name = fields.Char(required=True, copy=False, readonly=True, default="New")
+    active = fields.Boolean(default=True)
+    state = fields.Selection([
+        ('draft', "Draft"),
+        ('confirmed', "Confirmed"),
+        ('done', "Done"),
+        ('cancel', "Cancelled"),
+    ], required=True, default='draft', copy=False, tracking=True)
+    date = fields.Date(required=True, default=fields.Date.context_today, tracking=True)
+    user_id = fields.Many2one('res.users', string="Responsible", default=lambda self: self.env.user, tracking=True)
+    partner_id = fields.Many2one('res.partner', string="Partner", check_company=True, tracking=True)
+    company_id = fields.Many2one('res.company', required=True, index=True, ondelete='restrict', default=lambda self: self.env.company)
+    currency_id = fields.Many2one(related='company_id.currency_id')
+    line_ids = fields.One2many('my.module.model.line', 'order_id', string="Lines")
+    amount_total = fields.Monetary(compute='_compute_amount_total', store=True)
 
-    # --- Fields ---
-    name = fields.Char(
-        string='Reference',
-        required=True,
-        copy=False,
-        readonly=True,
-        default=lambda self: _('New'),
-    )
-    description = fields.Text(string='Description')
-    active = fields.Boolean(string='Active', default=True)
-    state = fields.Selection(
-        selection=[
-            ('draft', 'Draft'),
-            ('confirmed', 'Confirmed'),
-            ('done', 'Done'),
-            ('cancelled', 'Cancelled'),
-        ],
-        string='Status',
-        required=True,
-        copy=False,
-        default='draft',
-        tracking=True,
-    )
-    date = fields.Date(
-        string='Date',
-        required=True,
-        default=fields.Date.today,
-        tracking=True,
-    )
-    user_id = fields.Many2one(
-        'res.users',
-        string='Responsible',
-        default=lambda self: self.env.user,
-        tracking=True,
-    )
-    partner_id = fields.Many2one(
-        'res.partner',
-        string='Partner',
-        tracking=True,
-    )
-    company_id = fields.Many2one(
-        'res.company',
-        string='Company',
-        required=True,
-        default=_default_company_id,
-        index=True,
-    )
-    line_ids = fields.One2many(
-        'my.module.model.line',
-        'order_id',
-        string='Lines',
-    )
-    notes = fields.Html(string='Notes')
+    _positive_amount = models.Constraint("CHECK (amount_total >= 0)", "The total cannot be negative.")
 
-    # Computed
-    line_count = fields.Integer(
-        string='Line Count',
-        compute='_compute_line_count',
-        store=True,
-    )
-
-    # --- Compute methods ---
-    @api.depends('line_ids')
-    def _compute_line_count(self):
-        """Compute the number of lines per record."""
+    @api.depends('line_ids.price_total')
+    def _compute_amount_total(self):
         for record in self:
-            record.line_count = len(record.line_ids)
+            record.amount_total = sum(record.line_ids.mapped('price_total'))
 
-    # --- Constraints ---
     @api.constrains('date')
-    def _check_date_not_past(self):
-        """Ensure the date is not in the past for new records."""
-        for record in self:
-            if record.date and record.date < fields.Date.today() and record.state == 'draft':
-                raise ValidationError(
-                    _("Date cannot be in the past for draft records.")
-                )
+    def _check_date(self):
+        """Refuse a past date while draft; confirmed records keep their original date."""
+        today = fields.Date.context_today(self)
+        for record in self.filtered(lambda r: r.state == 'draft'):
+            if record.date < today:
+                raise ValidationError(self.env._("The date cannot be in the past."))
 
-    # --- CRUD overrides ---
     @api.model_create_multi
     def create(self, vals_list):
-        """Create records with auto-generated sequence reference.
-
-        Args:
-            vals_list: List of dictionaries with field values.
-
-        Returns:
-            Recordset of newly created records.
-        """
+        """Number new records from their own company's sequence, never another company's."""
         for vals in vals_list:
-            if vals.get('name', _('New')) == _('New'):
-                vals['name'] = self.env['ir.sequence'].next_by_code(
-                    'my.module.model'
-                ) or _('New')
+            if vals.get('name', "New") == "New":
+                company_id = vals.get('company_id') or self.env.company.id
+                vals['name'] = self.env['ir.sequence'].with_company(company_id).next_by_code('my.module.model') or "New"
         return super().create(vals_list)
 
-    def copy(self, default=None):
-        """Duplicate record with modified name.
+    def copy_data(self, default=None):
+        """Suffix duplicates with "(copy)" so they are not mistaken for the original."""
+        vals_list = super().copy_data(default=default)
+        for record, vals in zip(self, vals_list):
+            vals['name'] = self.env._("%s (copy)", record.name)
+        return vals_list
 
-        Args:
-            default: Dictionary of field values to override.
-
-        Returns:
-            New duplicated record.
-        """
-        self.ensure_one()
-        default = dict(default or {})
-        default.setdefault('name', _("%s (copy)", self.name))
-        return super().copy(default)
-
-    # --- Action methods ---
     def action_confirm(self):
-        """Confirm the record and transition to 'confirmed' state.
-
-        Returns:
-            bool: True on success.
-
-        Raises:
-            UserError: If the record is not in draft state.
-        """
-        for record in self:
-            if record.state != 'draft':
-                raise UserError(
-                    _("Only draft records can be confirmed. '%s' is in state '%s'.",
-                      record.name, record.state)
-                )
-            record.write({'state': 'confirmed'})
-        return True
+        """Confirm draft records all-or-nothing, naming every invalid record."""
+        if invalid := self.filtered(lambda r: r.state != 'draft'):
+            raise UserError(self.env._("Only draft records can be confirmed: %s", invalid.mapped('name')))
+        self.state = 'confirmed'
 
     def action_done(self):
-        """Mark the record as done.
-
-        Returns:
-            bool: True on success.
-
-        Raises:
-            UserError: If the record is not in confirmed state.
-        """
-        for record in self:
-            if record.state != 'confirmed':
-                raise UserError(_("Only confirmed records can be marked as done."))
-            record.write({'state': 'done'})
-        return True
+        """Mark confirmed records done all-or-nothing."""
+        if invalid := self.filtered(lambda r: r.state != 'confirmed'):
+            raise UserError(self.env._("Only confirmed records can be marked done: %s", invalid.mapped('name')))
+        self.state = 'done'
 
     def action_cancel(self):
-        """Cancel the record.
-
-        Returns:
-            bool: True on success.
-        """
-        self.write({'state': 'cancelled'})
-        return True
+        self.state = 'cancel'
 
     def action_draft(self):
-        """Reset the record to draft state.
-
-        Returns:
-            bool: True on success.
-        """
-        self.write({'state': 'draft'})
-        return True
+        self.state = 'draft'
 
 
 class MyModelLine(models.Model):
-    """Line items for MyModel."""
-
     _name = 'my.module.model.line'
-    _description = 'My Model Line'
-    _order = 'sequence, id'
+    _description = "My Model Line"
+    _order = 'order_id, sequence, id'
+    _check_company_auto = True
 
-    order_id = fields.Many2one(
-        'my.module.model',
-        string='Order',
-        required=True,
-        ondelete='cascade',
-        index=True,
-    )
-    sequence = fields.Integer(string='Sequence', default=10)
-    name = fields.Char(string='Description', required=True)
-    product_id = fields.Many2one('product.product', string='Product')
-    quantity = fields.Float(string='Quantity', default=1.0, required=True)
-    price_unit = fields.Float(string='Unit Price')
-    price_total = fields.Float(
-        string='Total',
-        compute='_compute_price_total',
-        store=True,
-    )
-    company_id = fields.Many2one(
-        related='order_id.company_id',
-        store=True,
-    )
+    order_id = fields.Many2one('my.module.model', required=True, ondelete='cascade', index=True)
+    company_id = fields.Many2one(related='order_id.company_id', store=True, index=True)
+    currency_id = fields.Many2one(related='order_id.currency_id')
+    sequence = fields.Integer(default=10)
+    name = fields.Char(string="Description", required=True)
+    product_id = fields.Many2one('product.product', check_company=True)
+    quantity = fields.Float(default=1.0, required=True)
+    price_unit = fields.Monetary()
+    price_total = fields.Monetary(compute='_compute_price_total', store=True)
 
     @api.depends('quantity', 'price_unit')
     def _compute_price_total(self):
-        """Compute total price as quantity * unit price."""
         for line in self:
             line.price_total = line.quantity * line.price_unit
 ```
 
+Notes on the choices above:
+- Action methods act on the whole recordset, pass the list directly to `self.env._("%s", invalid.mapped('name'))`, and raise once.
+- `fields.Date.context_today` uses the user's timezone (never UTC `fields.Date.today` for business dates).
+- `copy_data()`, not `copy()`, so batch duplication works cleanly.
+- Both `MyModel` and `MyModelLine` set `_check_company_auto = True` because both declare `check_company=True` fields.
+- `_order` always ends on unique `id` so pagination is deterministic.
+
 ---
 
-## File: `security/groups.xml`
+## `security/my_module_security.xml`
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <record id="module_category_my_module" model="ir.module.category">
+    <record id="res_groups_privilege_my_module" model="res.groups.privilege">
         <field name="name">My Module</field>
         <field name="sequence">20</field>
-    </record>
-
-    <record id="my_module_privilege" model="res.groups.privilege">
-        <field name="name">My Module</field>
-        <field name="category_id" ref="module_category_my_module"/>
-        <field name="sequence">20</field>
+        <field name="category_id" ref="base.module_category_supply_chain"/>
     </record>
 
     <record id="group_my_module_user" model="res.groups">
         <field name="name">User</field>
-        <field name="privilege_id" ref="my_module_privilege"/>
+        <field name="sequence">10</field>
+        <field name="privilege_id" ref="res_groups_privilege_my_module"/>
         <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
     </record>
 
     <record id="group_my_module_manager" model="res.groups">
-        <field name="name">Manager</field>
-        <field name="privilege_id" ref="my_module_privilege"/>
+        <field name="name">Administrator</field>
+        <field name="sequence">20</field>
+        <field name="privilege_id" ref="res_groups_privilege_my_module"/>
         <field name="implied_ids" eval="[(4, ref('group_my_module_user'))]"/>
         <field name="user_ids" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
     </record>
-</odoo>
-```
 
-**v19 note:** `res.groups` no longer has `category_id` — the category lives on the new `res.groups.privilege` model that sits between `ir.module.category` and `res.groups`. The field name for default users is `user_ids`, not `users`.
-
-
----
-
-## File: `security/ir.model.access.csv`
-
-```csv
-id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_my_module_model_user,my.module.model.user,model_my_module_model,group_my_module_user,1,1,1,0
-access_my_module_model_manager,my.module.model.manager,model_my_module_model,group_my_module_manager,1,1,1,1
-access_my_module_model_line_user,my.module.model.line.user,model_my_module_model_line,group_my_module_user,1,1,1,1
-access_my_module_model_line_manager,my.module.model.line.manager,model_my_module_model_line,group_my_module_manager,1,1,1,1
-```
-
----
-
-## File: `security/rules.xml`
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<odoo>
-    <!-- Multi-company rule (global) -->
-    <record id="rule_my_module_model_company" model="ir.rule">
-        <field name="name">My Model: Multi-Company</field>
+    <record id="my_model_comp_rule" model="ir.rule">
+        <field name="name">My Model multi-company</field>
         <field name="model_id" ref="model_my_module_model"/>
-        <field name="domain_force">
-            ['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]
-        </field>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
     </record>
 
-    <!-- User: own records or unassigned -->
-    <record id="rule_my_module_model_user" model="ir.rule">
-        <field name="name">My Model: User Own Records</field>
+    <record id="my_model_line_comp_rule" model="ir.rule">
+        <field name="name">My Model Line multi-company</field>
+        <field name="model_id" ref="model_my_module_model_line"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="my_model_user_own" model="ir.rule">
+        <field name="name">My Model: own or unassigned</field>
         <field name="model_id" ref="model_my_module_model"/>
-        <field name="domain_force">
-            ['|', ('user_id', '=', user.id), ('user_id', '=', False)]
-        </field>
+        <field name="domain_force">['|', ('user_id', '=', user.id), ('user_id', '=', False)]</field>
         <field name="groups" eval="[(4, ref('group_my_module_user'))]"/>
     </record>
 
-    <!-- Manager: all records -->
-    <record id="rule_my_module_model_manager" model="ir.rule">
-        <field name="name">My Model: Manager All Records</field>
+    <record id="my_model_see_all" model="ir.rule">
+        <field name="name">My Model: all records</field>
         <field name="model_id" ref="model_my_module_model"/>
         <field name="domain_force">[(1, '=', 1)]</field>
         <field name="groups" eval="[(4, ref('group_my_module_manager'))]"/>
@@ -424,15 +238,29 @@ access_my_module_model_line_manager,my.module.model.line.manager,model_my_module
 </odoo>
 ```
 
+Pick `category_id` from `odoo/addons/base/data/ir_module_category_data.xml`.
+
 ---
 
-## File: `data/sequence_data.xml`
+## `security/ir.model.access.csv`
+
+```csv
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_my_model_user,my.module.model user,model_my_module_model,group_my_module_user,1,1,1,0
+access_my_model_manager,my.module.model manager,model_my_module_model,group_my_module_manager,1,1,1,1
+access_my_model_line_user,my.module.model.line user,model_my_module_model_line,group_my_module_user,1,1,1,1
+```
+
+The manager `[(1, '=', 1)]` rule is needed because `group_my_module_manager` implies `group_my_module_user`, so without it the own-or-unassigned rule would bind managers too. Company rules have no `groups` (global, AND-ed onto every user). Never leave `group_id:id` empty in `ir.model.access.csv` (that grants to every user including portal/public). Full rules: `security.md`.
+
+---
+
+## `data/ir_sequence_data.xml`
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
-<odoo>
+<odoo noupdate="1">
     <record id="seq_my_module_model" model="ir.sequence">
-        <field name="name">My Model Sequence</field>
+        <field name="name">My Model</field>
         <field name="code">my.module.model</field>
         <field name="prefix">MM/%(year)s/</field>
         <field name="padding">5</field>
@@ -441,42 +269,33 @@ access_my_module_model_line_manager,my.module.model.line.manager,model_my_module
 </odoo>
 ```
 
+`noupdate="1"` on `<odoo>` preserves user prefix customizations across upgrades.
+
 ---
 
-## File: `views/my_model_views.xml`
+## `views/my_model_views.xml`
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Form View -->
-    <record id="my_module_model_view_form" model="ir.ui.view">
+    <record id="my_model_view_form" model="ir.ui.view">
         <field name="name">my.module.model.view.form</field>
         <field name="model">my.module.model</field>
         <field name="arch" type="xml">
-            <form string="My Model">
+            <form>
                 <header>
-                    <button name="action_confirm" type="object"
-                            string="Confirm" class="oe_highlight"
-                            invisible="state != 'draft'"/>
-                    <button name="action_done" type="object"
-                            string="Done" class="oe_highlight"
-                            invisible="state != 'confirmed'"/>
-                    <button name="action_cancel" type="object"
-                            string="Cancel"
-                            invisible="state in ('done', 'cancelled')"/>
-                    <button name="action_draft" type="object"
-                            string="Reset to Draft"
-                            invisible="state not in ('cancelled',)"/>
-                    <field name="state" widget="statusbar"
-                           statusbar_visible="draft,confirmed,done"/>
+                    <button name="action_confirm" type="object" string="Confirm"
+                            class="oe_highlight" invisible="state != 'draft'"/>
+                    <button name="action_done" type="object" string="Done"
+                            class="oe_highlight" invisible="state != 'confirmed'"/>
+                    <button name="action_cancel" type="object" string="Cancel"
+                            invisible="state in ('done', 'cancel')"/>
+                    <button name="action_draft" type="object" string="Reset to Draft"
+                            invisible="state != 'cancel'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,confirmed,done"/>
                 </header>
                 <sheet>
-                    <div class="oe_button_box" name="button_box">
-                    </div>
                     <div class="oe_title">
-                        <h1>
-                            <field name="name" readonly="1"/>
-                        </h1>
+                        <h1><field name="name" readonly="1"/></h1>
                     </div>
                     <group>
                         <group>
@@ -486,6 +305,7 @@ access_my_module_model_line_manager,my.module.model.line.manager,model_my_module
                         </group>
                         <group>
                             <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="currency_id" invisible="1"/>
                         </group>
                     </group>
                     <notebook>
@@ -498,241 +318,164 @@ access_my_module_model_line_manager,my.module.model.line.manager,model_my_module
                                     <field name="quantity"/>
                                     <field name="price_unit"/>
                                     <field name="price_total"/>
+                                    <field name="currency_id" column_invisible="1"/>
                                 </list>
                             </field>
                         </page>
-                        <page string="Notes" name="notes">
-                            <field name="notes" placeholder="Add internal notes here..."/>
-                        </page>
                     </notebook>
+                    <group class="oe_subtotal_footer">
+                        <field name="amount_total"/>
+                    </group>
                 </sheet>
                 <chatter/>
             </form>
         </field>
     </record>
 
-    <!-- List View -->
-    <record id="my_module_model_view_list" model="ir.ui.view">
+    <record id="my_model_view_list" model="ir.ui.view">
         <field name="name">my.module.model.view.list</field>
         <field name="model">my.module.model</field>
         <field name="arch" type="xml">
-            <list string="My Models" multi_edit="1" default_order="date desc">
+            <list multi_edit="1">
                 <field name="name" decoration-bf="1"/>
                 <field name="partner_id"/>
                 <field name="user_id"/>
                 <field name="date"/>
-                <field name="line_count"/>
-                <field name="state"
+                <field name="amount_total" sum="Total"/>
+                <field name="currency_id" column_invisible="1"/>
+                <field name="company_id" groups="base.group_multi_company" optional="show"/>
+                <field name="state" widget="badge"
                        decoration-success="state == 'done'"
                        decoration-info="state == 'confirmed'"
-                       decoration-muted="state == 'cancelled'"
-                       widget="badge"/>
+                       decoration-muted="state == 'cancel'"/>
             </list>
         </field>
     </record>
 
-    <!-- Search View -->
-    <record id="my_module_model_view_search" model="ir.ui.view">
+    <record id="my_model_view_search" model="ir.ui.view">
         <field name="name">my.module.model.view.search</field>
         <field name="model">my.module.model</field>
         <field name="arch" type="xml">
-            <search string="Search">
+            <search>
                 <field name="name"/>
                 <field name="partner_id"/>
                 <field name="user_id"/>
                 <separator/>
-                <filter name="filter_draft" string="Draft"
-                        domain="[('state', '=', 'draft')]"/>
-                <filter name="filter_confirmed" string="Confirmed"
-                        domain="[('state', '=', 'confirmed')]"/>
-                <filter name="filter_done" string="Done"
-                        domain="[('state', '=', 'done')]"/>
+                <filter name="filter_draft" string="Draft" domain="[('state', '=', 'draft')]"/>
+                <filter name="filter_confirmed" string="Confirmed" domain="[('state', '=', 'confirmed')]"/>
                 <separator/>
-                <filter name="filter_my_records" string="My Records"
-                        domain="[('user_id', '=', uid)]"/>
+                <filter name="filter_my_records" string="My Records" domain="[('user_id', '=', uid)]"/>
+                <filter name="filter_archived" string="Archived" domain="[('active', '=', False)]"/>
                 <separator/>
-                <filter name="filter_archived" string="Archived"
-                        domain="[('active', '=', False)]"/>
-                <group expand="0" string="Group By">
-                    <filter name="groupby_state" string="Status"
-                            context="{'group_by': 'state'}"/>
-                    <filter name="groupby_user" string="Responsible"
-                            context="{'group_by': 'user_id'}"/>
-                    <filter name="groupby_partner" string="Partner"
-                            context="{'group_by': 'partner_id'}"/>
-                    <filter name="groupby_date" string="Date"
-                            context="{'group_by': 'date:month'}"/>
-                </group>
+                <filter name="groupby_state" string="Status" context="{'group_by': 'state'}"/>
+                <filter name="groupby_user" string="Responsible" context="{'group_by': 'user_id'}"/>
+                <filter name="groupby_date" string="Date" context="{'group_by': 'date:month'}"/>
             </search>
         </field>
     </record>
 </odoo>
 ```
 
+`name=` on every `<page>` and `<filter>` so other modules can inherit them. Group-by filters
+go directly under `<search>` — core no longer uses `<group expand="0" string="Group By">`.
+
 ---
 
-## File: `views/menu.xml`
+## `views/my_model_menus.xml`
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Action -->
-    <record id="my_module_model_action" model="ir.actions.act_window">
+    <record id="my_model_action" model="ir.actions.act_window">
         <field name="name">My Models</field>
         <field name="res_model">my.module.model</field>
         <field name="view_mode">list,form</field>
-        <field name="search_view_id" ref="my_module_model_view_search"/>
+        <field name="search_view_id" ref="my_model_view_search"/>
         <field name="context">{'search_default_filter_my_records': 1}</field>
         <field name="help" type="html">
-            <p class="o_view_nocontent_smiling_face">
-                Create your first record
-            </p>
-            <p>
-                Click the "New" button to get started.
-            </p>
+            <p class="o_view_nocontent_smiling_face">Create your first record</p>
         </field>
     </record>
 
-    <!-- Root Menu -->
-    <menuitem id="my_module_menu_root"
-              name="My Module"
-              sequence="100"
+    <menuitem id="my_module_menu_root" name="My Module" sequence="100"
               groups="group_my_module_user"/>
-
-    <!-- Sub Menus -->
-    <menuitem id="my_module_menu_main"
-              name="My Models"
-              parent="my_module_menu_root"
-              action="my_module_model_action"
-              sequence="10"/>
+    <menuitem id="my_module_menu_main" name="My Models" parent="my_module_menu_root"
+              action="my_model_action" sequence="10"/>
 </odoo>
 ```
 
----
-
-## File: `tests/__init__.py`
-
-```python
-from . import test_my_model
-```
+`group_ids` (renamed from `groups_id` in 19.0) is the field name on `ir.actions.*` records; `groups=` on `<menuitem>` is still the shorthand attribute.
 
 ---
 
-## File: `tests/test_my_model.py`
+## `controllers/my_module.py` (only if there is an endpoint)
 
 ```python
-from odoo import fields
-from odoo.exceptions import UserError, ValidationError
-from odoo.tests.common import TransactionCase
+from werkzeug.exceptions import BadRequest, NotFound
 
-
-class TestMyModel(TransactionCase):
-    """Test cases for my.module.model."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Set up test data."""
-        super().setUpClass()
-        cls.partner = cls.env['res.partner'].create({
-            'name': 'Test Partner',
-        })
-        cls.record = cls.env['my.module.model'].create({
-            'partner_id': cls.partner.id,
-            'date': fields.Date.today(),
-        })
-
-    def test_create_generates_sequence(self):
-        """Test that create assigns a sequence reference."""
-        self.assertNotEqual(self.record.name, 'New')
-        self.assertTrue(self.record.name.startswith('MM/'))
-
-    def test_action_confirm_from_draft(self):
-        """Test confirming a draft record transitions to confirmed."""
-        self.assertEqual(self.record.state, 'draft')
-        self.record.action_confirm()
-        self.assertEqual(self.record.state, 'confirmed')
-
-    def test_action_confirm_not_draft_raises(self):
-        """Test confirming a non-draft record raises UserError."""
-        self.record.action_confirm()
-        with self.assertRaises(UserError):
-            self.record.action_confirm()
-
-    def test_line_count_computed(self):
-        """Test that line count is correctly computed."""
-        self.assertEqual(self.record.line_count, 0)
-        self.env['my.module.model.line'].create({
-            'order_id': self.record.id,
-            'name': 'Test Line',
-            'quantity': 5,
-            'price_unit': 10.0,
-        })
-        self.assertEqual(self.record.line_count, 1)
-```
-
----
-
-## File: `controllers/__init__.py`
-
-```python
-from . import main
-```
-
----
-
-## File: `controllers/main.py`
-
-```python
 from odoo import http
 from odoo.http import request
 
 
 class MyModuleController(http.Controller):
-    """HTTP controllers for my module."""
 
     @http.route('/my_module/data', type='jsonrpc', auth='user', methods=['POST'])
     def get_data(self, record_id, **kwargs):
-        """Fetch record data for authenticated users.
-
-        Args:
-            record_id (int): ID of the record to fetch.
-
-        Returns:
-            dict: Record data.
-        """
-        if not isinstance(record_id, int) or record_id <= 0:
-            raise ValueError("Invalid record ID")
-
-        record = request.env['my.module.model'].browse(record_id)
+        """Return a summary after confirming the record exists and is readable."""
+        if not isinstance(record_id, int) or isinstance(record_id, bool) or record_id <= 0:
+            raise BadRequest("Invalid record id")
+        record = request.env['my.module.model'].browse(record_id).exists()
+        if not record:
+            raise NotFound()
         record.check_access('read')
-        return {
-            'id': record.id,
-            'name': record.name,
-            'state': record.state,
-        }
+        return {'id': record.id, 'name': record.name, 'state': record.state}
 ```
+
+Name controller files `<module_name>.py` or `<inherited_module>.py` (avoid legacy `main.py`).
 
 ---
 
-## File: `wizards/__init__.py`
+## `tests/` — only when the user asked for tests
+
+Do not add a `tests/` folder by default. When the user says yes, follow `testing.md` and start
+from `BaseCommon` (available in Odoo 19 at `odoo/addons/base/tests/common.py`; never assume demo records exist):
 
 ```python
-from . import my_wizard
+from odoo import fields
+from odoo.addons.base.tests.common import BaseCommon
+from odoo.exceptions import UserError
+from odoo.tests import tagged
+
+
+@tagged('post_install', '-at_install')
+class TestMyModel(BaseCommon):
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.record = cls.env['my.module.model'].create({'date': fields.Date.context_today(cls.env['my.module.model'])})
+
+    def test_confirm_from_draft(self):
+        self.record.action_confirm()
+        self.assertEqual(self.record.state, 'confirmed')
+
+    def test_confirm_twice_raises(self):
+        self.record.action_confirm()
+        with self.assertRaises(UserError):
+            self.record.action_confirm()
 ```
+
+Note: In Odoo 19, `TransactionCase` / `BaseCommon` defaults to `at_install`; add `@tagged('post_install', '-at_install')` unless the test specifically must run at install time.
 
 ---
 
-## File: `demo/demo_data.xml`
+## `demo/demo_data.xml` (only if asked)
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
-<odoo>
-    <data noupdate="1">
-        <record id="demo_record_1" model="my.module.model">
-            <field name="partner_id" ref="base.res_partner_2"/>
-            <field name="user_id" ref="base.user_demo"/>
-            <field name="date" eval="DateTime.today()"/>
-        </record>
-    </data>
+<odoo noupdate="1">
+    <record id="demo_record_1" model="my.module.model">
+        <field name="partner_id" ref="base.res_partner_2"/>
+        <field name="user_id" ref="base.user_demo"/>
+        <field name="date" eval="DateTime.today()"/>
+    </record>
 </odoo>
 ```

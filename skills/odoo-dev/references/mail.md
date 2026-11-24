@@ -1,4 +1,4 @@
-# Mail & Tracking — Odoo 19+
+# Mail & Tracking — Odoo 19
 
 ## Table of Contents
 
@@ -99,8 +99,14 @@ amount = fields.Float(..., tracking=3)           # shown third
 
 ### What gets tracked
 
-When a tracked field changes, Odoo creates a `mail.tracking.value` record and posts a message like:
+When a tracked field changes, Odoo creates `mail.tracking.value` records and posts a message like:
 > State: Draft → Confirmed
+
+The values are linked to a `mail.message` (`tracking_value_ids`) posted by `_message_track`
+([mail_thread.py:645](../../../../addons/mail/models/mail_thread.py#L645)). It is
+written by a **precommit hook** (`_track_finalize`), so `env.flush_all()` does not create it;
+`env.cr.flush()` does ([sql_db.py:176](../../../../odoo/sql_db.py#L176)). A record created in the same transaction is not tracked
+until that flush (tests: call `self.env.cr.flush()` between create and the tracked write).
 
 **Rules:**
 - Use `tracking=True` on business-critical fields (state, partner, amounts)
@@ -114,6 +120,12 @@ When a tracked field changes, Odoo creates a `mail.tracking.value` record and po
 
 `message_post()` is singleton-only. Loop explicitly when posting the same audit
 entry on multiple records.
+
+- A plain `str` body is HTML-escaped ([mail_thread.py:2338](../../../../addons/mail/models/mail_thread.py#L2338):
+  "escape if text, keep if markup"), so tags show as text. Build HTML with `Markup` and pass
+  values through `%` so they are escaped: `Markup("<b>%s</b>") % value`.
+- A message posted and then followed by `raise` is rolled back with the transaction: the
+  chatter never shows it. To keep a trace of a failure, see `transactions.md` section 9.
 
 ### Post a note (internal, no notification)
 
@@ -151,7 +163,7 @@ record.message_post_with_source(
 self.ensure_one()
 attachment = self.env['ir.attachment'].create({
     'name': 'report.pdf',
-    'datas': base64_content,
+    'raw': pdf_bytes,
     'res_model': self._name,
     'res_id': self.id,
 })
@@ -269,7 +281,7 @@ record.message_unsubscribe(partner_ids=[partner.id])
 
 ### Auto-subscribe on create
 
-By default, the creator and the `partner_id` field are auto-subscribed. Control with context:
+By default, `mail.thread.create()` auto-subscribes **only the creator** (`self.env.user.partner_id`), NOT `partner_id` (a model must explicitly call `message_subscribe()` if it wants `partner_id` subscribed). Control with context:
 
 ```python
 # Skip auto-subscribe on create

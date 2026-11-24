@@ -1,4 +1,11 @@
-# Testing — Odoo 19+
+# Testing — Odoo 19
+
+**Tests are not automatic. Ask first.** Before writing any test, tell the user which
+behaviors you would cover and let them decide. Push for a yes when the change touches
+security, money, or a state machine; accept a no everywhere else. Never create a `tests/`
+folder on your own initiative.
+
+This file is what to do once the user says yes.
 
 ## Table of Contents
 
@@ -29,12 +36,12 @@
 ```python
 from odoo.tests import tagged, TransactionCase
 
-# Default: runs at install time
+# Default in v19 (no @tagged): standard + at_install
 @tagged('post_install', '-at_install')  # run only after all modules installed
 class TestMyModel(TransactionCase):
     ...
 
-@tagged('at_install')  # default — runs during module install
+@tagged('at_install')  # the default, written out: runs during module install
 class TestMyModelInstall(TransactionCase):
     ...
 
@@ -44,8 +51,9 @@ class TestSpecific(TransactionCase):
 ```
 
 **Tag rules:**
-- `at_install` — runs during module installation (default)
-- `post_install` — runs after all modules are installed
+- `at_install` — runs during module installation (v19 default for untagged classes,
+  [odoo/tests/common.py:317](../../../../odoo/tests/common.py#L317))
+- `post_install` — runs after all modules are installed (opt in, always with `-at_install`)
 - `-at_install` — exclude from install-time tests
 - Custom tags can be used for filtering: `--test-tags my_custom_tag`
 - Use `post_install` for tests that depend on other modules being fully loaded
@@ -135,7 +143,7 @@ and compute methods exactly as the web client does.
 
 ### Basic usage:
 ```python
-from odoo.tests.common import Form
+from odoo.tests import Form
 
 def test_onchange_partner_sets_address(self):
     """Test that selecting a partner fills the address fields."""
@@ -208,7 +216,7 @@ def setUpClass(cls):
     cls.sale_user = cls.env['res.users'].create({
         'name': 'Sale User',
         'login': 'sale_user_test',
-        'groups_id': [
+        'group_ids': [
             Command.set([
                 cls.env.ref('sales_team.group_sale_salesman').id,
                 cls.env.ref('base.group_user').id,
@@ -218,7 +226,7 @@ def setUpClass(cls):
     cls.sale_manager = cls.env['res.users'].create({
         'name': 'Sale Manager',
         'login': 'sale_manager_test',
-        'groups_id': [
+        'group_ids': [
             Command.set([
                 cls.env.ref('sales_team.group_sale_salesman_all_leads').id,
                 cls.env.ref('base.group_user').id,
@@ -246,17 +254,36 @@ def test_user_cannot_read_others_records(self):
         self.order.with_user(self.sale_user).read(['name'])
 ```
 
-### Testing check_access explicitly:
+### Testing access explicitly:
 ```python
-def test_acl_permissions(self):
-    """Test ACL grants correct permissions."""
+def test_access_permissions(self):
     order = self.order.with_user(self.sale_user)
-    # check_access_rights returns None on success, raises AccessError on failure
-    order.check_access_rights('read')
-    order.check_access_rights('write')
+    order.check_access('read')            # raises AccessError on failure
+    order.check_access('write')
+    self.assertFalse(order.has_access('unlink'))
     with self.assertRaises(AccessError):
-        order.check_access_rights('unlink')
+        order.check_access('unlink')
+
+def test_access_subset(self):
+    orders = self.orders.with_user(self.sale_user)
+    self.assertEqual(orders._filtered_access('write'), self.own_orders)
 ```
+
+`check_access_rights()`, `check_access_rule()` and `_filter_access_rules()` are deprecated since
+18.0 (they still run and warn) — use `check_access()`, `has_access()` and `_filtered_access()`. All three return
+"allowed" under `sudo()`, so always call them on a `with_user(...)` recordset.
+
+### Testing the multi-company restriction
+
+```python
+def test_other_company_is_invisible(self):
+    user = self.sale_user.with_company(self.company_b)
+    with self.assertRaises(AccessError):
+        self.order_company_a.with_user(user).check_access('read')
+```
+
+A model with a multi-company `ir.rule` deserves this test more than it deserves a happy-path
+compute test.
 
 ---
 
@@ -393,16 +420,10 @@ class TestMyController(HttpCase):
     """Test HTTP controllers."""
 
     def test_json_endpoint(self):
-        """Test JSON-RPC endpoint returns expected data."""
+        """Test JSON-RPC endpoint returns expected data (make_jsonrpc_request in common.py:2635)."""
         self.authenticate('admin', 'admin')
-        response = self.url_open(
-            '/my_module/get_data',
-            data=json.dumps({'jsonrpc': '2.0', 'params': {'record_id': 1}}),
-            headers={'Content-Type': 'application/json'},
-        )
-        self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertIn('result', result)
+        result = self.make_jsonrpc_request('/my_module/get_data', {'record_id': 1})
+        self.assertIn('id', result)
 
     def test_http_page(self):
         """Test HTTP page renders correctly."""
@@ -412,9 +433,8 @@ class TestMyController(HttpCase):
         self.assertIn(b'Expected Content', response.content)
 
     def test_unauthenticated_access_denied(self):
-        """Test that unauthenticated access is rejected."""
-        response = self.url_open('/my_module/get_data')
-        # Should redirect to login
+        """Test that unauthenticated access redirects to login (pass allow_redirects=False!)."""
+        response = self.url_open('/my_module/page', allow_redirects=False)
         self.assertEqual(response.status_code, 303)
 ```
 
@@ -428,7 +448,16 @@ self.authenticate('admin', 'admin')
 
 # No authentication (public user)
 self.authenticate(None, None)
+
+# Password just confirmed: methods under @check_identity run instead of returning the
+# res.users.identitycheck dialog (odoo/tests/common.py:2374, 2389-2392)
+self.authenticate('admin', 'admin', session_extra={'identity-check-last': time.time()})
 ```
+
+To test the dialog itself, authenticate without it, call the button, then replay with
+`call_button res.users.identitycheck run_check [[wizard_id]]` and `kwargs={'context': {'password': ...}}`
+(res_users.py:1430-1439). A direct ORM call of a `@check_identity` method outside a request raises
+`UserError` before the method's own checks.
 
 ---
 
@@ -547,6 +576,9 @@ def test_line_values(self):
 ## 10. Running Tests
 
 ### CLI commands:
+Odoo 19 runs on PostgreSQL 14, port 5432, and has no `odoo.conf`: run
+`data_venv/bin/python odoo-bin --addons-path=... -d mydb --db_port=5432 ...` (or rely on the default port).
+Never `-s/--save`, never set `PGPORT` globally.
 ```bash
 # Run all tests for a module
 ./odoo-bin -d mydb -i my_module --test-enable --stop-after-init
@@ -569,6 +601,19 @@ def test_line_values(self):
 # Exclude slow tests
 ./odoo-bin -d mydb --test-tags /my_module,-slow
 ```
+
+### One module's Hoot (JS) tests
+The Hoot runner is `web`'s `WebSuite` (`addons/web/tests/test_js.py:185-196`); `/my_module` never selects it. Pick the
+module's Hoot suite with a tag parameter, which `HOOTCommon.get_hoot_filters()` turns into a suite filter
+(`test_js.py:117-126`). `-u my_module` loads only the updated module's tests, so update first, then run without `-u`
+(headless Chrome; macOS path known to `odoo/tests/common.py:2150`). Declare the files in
+`'web.assets_unit_tests': ['my_module/static/tests/**/*']`.
+
+```bash
+./odoo-bin -d mydb -u my_module --stop-after-init        # load code + assets
+./odoo-bin -d mydb --test-enable --test-tags "/web:WebSuite.test_unit_desktop[@my_module]" --stop-after-init
+```
+A passing `-u ... --test-tags /my_module` run with no `[HOOT]` line in the log has NOT run the JS tests.
 
 ### Test tag format:
 ```
@@ -635,13 +680,18 @@ def test_confirm_already_confirmed_raises(self):
         self.record.action_confirm()
 ```
 
-### DO NOT modify setUpClass data in tests:
+### DO NOT write to shared data in a `SingleTransactionCase`:
+`TransactionCase` (the default) rolls every test back to its savepoint
+([odoo/tests/common.py:1143](../../../../odoo/tests/common.py#L1143)), so writing to a
+`setUpClass` record there is fine and is what core tests do
+([test_sale_prices.py:651](../../../../addons/sale/tests/test_sale_prices.py#L651)).
+`SingleTransactionCase` keeps the write for every later test:
 ```python
-# BAD — modifies shared data, breaks other tests
+# BAD in SingleTransactionCase — the next test sees 'Changed'
 def test_something(self):
-    self.partner.write({'name': 'Changed'})  # affects all subsequent tests!
+    self.partner.write({'name': 'Changed'})
 
-# GOOD — create a copy or use fresh data
+# GOOD — change a copy
 def test_something(self):
     partner = self.partner.copy({'name': 'Changed'})
     ...

@@ -1,4 +1,4 @@
-# ORM Excellence — Odoo 19+
+# ORM Excellence — Odoo 19
 
 Use this reference for any non-trivial Odoo Python code. The default standard is:
 **batch-safe, access-safe, company-safe, cache-correct, and easy to review.**
@@ -98,6 +98,14 @@ def write(self, vals):
 - Capture old values before `super()` only for fields you actually need.
 - Side effects after `super()` see final values and generated recomputes.
 - Never write inside a compute method to fields that are part of the same recompute chain.
+- A guard in a `base` (`_inherit = 'base'`) `write()` override sits below every model's own `write()` in the MRO:
+  it sees the keys the model adds before `super()` (crm.lead `probability` on Won, crm_lead.py:829-861;
+  project.task `date_end`, project_task.py:1303) and the writes core makes after `super()` returns, on the same
+  and on other records (res.partner `_fields_sync`, res_partner.py:770-815). It cannot tell the client's keys
+  from Odoo's: judge the client's values where they enter (the RPC controller), not in `base.write`.
+- Per-call state for such a guard: a `ContextVar` set in the controller and reset in `finally`. The `finally` is
+  required: v19 does not give each request a fresh `contextvars.Context()` — prefork workers and cron threads reuse
+  one thread for many jobs, so an unreset value leaks into the next request.
 
 ### `unlink()`
 
@@ -119,7 +127,7 @@ def _unlink_except_done(self):
 
 ## 4. Domains
 
-Use the Odoo 19 `Domain` API for dynamic composition. It is safer and more readable than hand-building prefix-list operators.
+Use the `Domain` API for dynamic composition. It is safer and more readable than hand-building prefix-list operators.
 
 ```python
 from odoo.fields import Domain
@@ -134,7 +142,7 @@ moves = self.env['account.move'].search_fetch(domain, ['partner_id', 'amount_tot
 
 ### Relational sub-conditions: `any` / `not any`
 
-Filter a record by a condition on its related records. This is the v19 replacement for nested subqueries and the removed `auto_join`:
+Filter a record by a condition on its related records. This replaces nested subqueries and the removed `auto_join`:
 
 ```python
 # orders having at least one late line
@@ -146,6 +154,7 @@ Domain('invoice_ids', 'not any', [('payment_state', '=', 'not_paid')])
 - `any` on a many2one / `id` matches when the target satisfies the sub-domain (searched with `active_test=False`); on an x2many it searches the comodel with the field's context, applying the comodel's record rules.
 - `any!` / `not any!` behave like `any` but **bypass the comodel's record rules** — security-sensitive, internal use only.
 - Canonical operators are `in` / `not in` (the optimizer rewrites `=` / `!=` into them) plus `like`/`ilike`/`=like`/`=ilike` and their negations. In `in` values, `False` means "not set".
+- `('f', 'not in', vals)` also matches records where `f` is empty (`NOT IN ... OR f IS NULL`, [odoo/orm/fields.py:1300](../../../../odoo/orm/fields.py#L1300)). Add `('f', '!=', False)` when empty must not match.
 
 **Rules:**
 - Start from `Domain.TRUE` / `Domain.FALSE` when conditionally composing.
@@ -155,7 +164,16 @@ Domain('invoice_ids', 'not any', [('payment_state', '=', 'not_paid')])
 - Avoid Python filtering on large sets when the domain can express the condition.
 - For a raw-SQL condition that must still survive `filtered_domain()`, use `Domain.custom(to_sql=..., predicate=...)` and supply both callables.
 - Rewrite leaves (e.g. remap a field name) with `domain.map_conditions(fn)` instead of re-parsing the list.
+- Walking a domain yourself: `Domain(list)` keeps the value of `any` / `not any` as a plain list (only
+  `internal=True` turns it into a `Domain`, [domains.py:253-256](../../../../odoo/orm/domains.py#L253)) and
+  `iter_conditions()` does not descend into it, so recurse with `Domain(condition.value)`; `('id', 'any', D)` is D on
+  the same model ([domains.py:1371-1374](../../../../odoo/orm/domains.py#L1371)) although `id` is not relational.
 - Never pass raw user text through `eval()`; parse controlled literals with `ast.literal_eval()` or JSON.
+- A `date` value compared with a **Datetime** field is widened to the user's whole local day: the value becomes local
+  midnight in UTC and `<=` becomes `<` next local midnight ([domains.py:1566-1669](../../../../odoo/orm/domains.py#L1566)).
+  So `pricelist._get_product_price(p, 1, date=some_date)` matches rules ending the previous local day too. Records meant
+  for "night D" store the local day in UTC (`D 00:00` to `D 23:59:59` local, converted); read them with a datetime
+  (local noon in UTC), not a bare date. The result depends on the acting user's `tz` — a cron as OdooBot has none.
 
 ---
 
@@ -180,6 +198,10 @@ order.write({
 - `Command.update(id, vals)` for existing linked records.
 - `Command.unlink(id)` removes the relation; `Command.delete(id)` deletes the child.
 - `Command.set(ids)` replaces all links; use carefully in concurrent flows.
+- On a one2many these commands write the inverse many2one of the records they name: `unlink(id)` clears it on
+  any record named, not only current children; `link` / `set` move records into the last written record; a plain
+  id list is a SET and `False` a CLEAR (fields_relational.py:748-756, 993-997, 1029-1050). A guard on that
+  inverse field must judge these commands, not only the dicts of CREATE/UPDATE.
 - Avoid mixing user-provided IDs with `sudo()` without checking ownership/access first.
 
 ---
@@ -215,7 +237,23 @@ for order in self:
 - In compute methods, assign every record every time.
 - For known field reads after a search, prefer `search_fetch(domain, fields)`.
 - For existing recordsets, use `records.fetch(fields)` before heavy loops.
-- Need webclient-formatted groups (labels, ranges) rather than raw tuples? Use `formatted_read_group(...)` (same args, returns a list of dicts).
+- Need webclient-formatted groups (labels, ranges) rather than raw tuples? Use `formatted_read_group(...)` (same args, returns a list of dicts) — it lives in the web layer, not on `BaseModel`.
+- Several groupings in one round-trip: `_read_grouping_sets(domain, grouping_sets, aggregates, order)`.
+
+### Which of the three in v19
+
+| Method | Layer | Relational values | Use for |
+|---|---|---|---|
+| `read_group(...)` | public, **deprecated since 19.0** | ids | old callers only; never new code |
+| `_read_group(...)` | backend | recordsets | all server Python |
+| `formatted_read_group(...)` | `addons/web` | formatted dicts | the web client and RPC callers |
+
+`read_group(domain, fields, groupby, offset, limit, orderby, lazy)` still works in v19 but is
+`@api.deprecated` ([models.py:2754](../../../../odoo/orm/models.py#L2754)).
+
+When overriding the group-by hooks, the v19 signatures take a `Query`:
+`_read_group_select(aggregate_spec, query)`, `_read_group_groupby(alias, groupby_spec, query)`,
+`_read_group_having(having_domain, query)`, `_read_group_orderby(order, groupby_terms, query)`.
 
 ---
 
@@ -242,6 +280,17 @@ def _compute_amount_custom(self):
 - Non-stored computed fields are for cheap, context-sensitive, form-only values.
 - Do not put business invariants in `@api.onchange`; onchanges are UI hints only.
 - Constraints enforce invariants; computes derive values; onchanges improve UX.
+
+---
+
+**Building a "what the form holds" record:** `self.new(values, origin=record)` does not take the saved values of
+the fields missing from `values`; core's onchange copies them in itself (web/models/models.py:2112-2117). Read the
+fields you need from `record` and pass them: `record.new({**saved, **values}, origin=record)`.
+
+**Onchange answers on the client:** a key absent from the answer leaves the client's value unchanged, a key present
+becomes a change that is saved. For a NEW record the client fills fields it never received with placeholders (0,
+False) and sends all values on save (web/static/src/model/relational_model/record.js:83-84, 708-711): removing a
+value from an answer must be paired with dropping that field at create, or the placeholder is stored.
 
 ---
 
@@ -296,6 +345,10 @@ def action_portal_download(self, token):
 - Do not mix sudoed and non-sudoed recordsets in domains without thinking through leakage.
 - Public/portal controllers must return 404/AccessError for unauthorized records.
 - Never rely on view invisibility for security.
+- `ondelete='cascade'` is a database cascade: `unlink()` checks access only on the records you delete
+  ([models.py:4200-4338](../../../../odoo/orm/models.py#L4200)), never on the rows PostgreSQL removes with them. A link from
+  history / audit / immutable rows (and from records nobody may delete) to a deletable parent must be `restrict`, or a
+  user with delete rights on the parent wipes history they cannot delete directly. Retire parents with `active`.
 
 ---
 
@@ -311,11 +364,19 @@ journals = self.env['account.journal'].search(
 ```
 
 **Rules:**
-- Company-dependent models should have `company_id` indexed.
-- Business-critical Many2one fields should use `check_company=True`.
-- For cross-company processing, group by company and use `with_company(company)`.
-- Do not write records from multiple companies in one batch if defaults, sequences, journals, taxes, or accounts depend on company.
+- `company_id` is indexed and defaults to `self.env.company`.
+- Every company-scoped Many2one uses `check_company=True`, and the model sets
+  `_check_company_auto = True`.
+- Cross-company processing groups by company: `for company, recs in self.grouped('company_id').items(): recs.with_company(company)...`
+- Do not write records of several companies in one batch when defaults, sequences,
+  journals, taxes or accounts depend on the company.
+- `self.env.company` for the active company, `self.env.companies` for the visible set.
+  Never `self.env.user.company_id` in business logic.
 - Be explicit with `active_test=False` when archived records matter.
+
+Company scoping in the database is enforced by a global `ir.rule` (no groups) with
+`['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]`.
+Full rules, branch companies and the `parent_of` helpers: `multicompany.md`.
 
 ---
 
@@ -330,7 +391,7 @@ _external_ref_unique = models.Constraint(
 )
 ```
 
-For read-then-write atomicity, take an explicit row lock (v19 ORM API) instead of hand-writing `SELECT ... FOR UPDATE`:
+For read-then-write atomicity, take an explicit row lock instead of hand-writing `SELECT ... FOR UPDATE`:
 
 ```python
 batch = self.search([('state', '=', 'pending')], limit=100, order='id')
@@ -342,7 +403,7 @@ locked.write({'state': 'processing'})
 - Use `models.Constraint(...)` for uniqueness and hard invariants.
 - Use Python `@api.constrains` when the invariant needs ORM logic.
 - For scarce resources (sequence gaps, one worker per row, inventory reservations), use `lock_for_update()` (must lock all, raises `LockError`) or `try_lock_for_update(limit=...)` (locks what it can, returns the subset). See `transactions.md` section 10.
-- Detect hierarchy loops with `_has_cycle(field_name=None)` (returns `True` when a loop exists) — not the deprecated `_check_recursion()`.
+- Detect hierarchy loops with `_has_cycle(field_name=None)` (returns `True` when a loop exists). `_check_recursion()` and `_check_m2m_recursion()` are deprecated since 18.0 and return the inverted boolean.
 - Avoid check-then-create races; prefer SQL constraints or atomic upsert when the ORM cannot express it.
 
 ---
@@ -479,3 +540,16 @@ Treat these as blockers unless there is a measured reason:
 - Direct float equality on quantities, currency, or UoM values.
 - `cr.commit()` outside cron/import/migration code.
 - Domains assembled with fragile nested `|`/`&` lists when `Domain` would be clearer.
+- A module with two classes that `_inherit` the same model (e.g. two `Base` classes on `base`) and a new
+  `from .other_file import CONSTANT` between its model files: the import creates `other_file`'s classes earlier,
+  model classes load in creation order ([models.py:266](../../../../odoo/orm/models.py#L266),
+  [registry.py:401](../../../../odoo/orm/registry.py#L401)), so the order of the two overrides in the MRO flips.
+  Keep shared constants in a file without model classes, or repeat a short literal.
+
+### Sibling-search constraints and x2many write commands
+
+- A constraint that searches siblings must exclude only the record itself (`('id', '!=', rec.id)`), not `self.ids`:
+  constraints run after the whole batch is written, so excluding the batch hides records saved in the same call from each other.
+- A helper that predicts an x2many write must normalize the value as `_RelationalMulti.write_batch` does
+  ([fields_relational.py:748-756](../../../../odoo/orm/fields_relational.py#L748)): a tuple, a recordset or a plain id list means SET,
+  `False`/`None` means CLEAR; only a list of tuples is a command list.

@@ -1,4 +1,4 @@
-# Fields — Odoo 19+
+# Fields — Odoo 19
 
 Reference for declaring fields, computes, relations, constraints, and onchanges. Sourced from `odoo/orm/fields.py`, `fields_relational.py`, `fields_binary.py`, and `decorators.py`.
 
@@ -83,10 +83,23 @@ Key compute attributes (`fields.py`):
 - `compute='_method'` — implies `store=False` and `copy=False` unless overridden.
 - `store=True` — persist; needed for search/group/list on the field.
 - `compute_sudo` — recompute as superuser (default `True` for stored, `False` for non-stored).
+  So a non-stored compute that searches or reads another model runs with the user's rights:
+  a user without read access on that model gets an AccessError when the form loads.
 - `precompute=True` — compute *before* the INSERT instead of at flush. A provided default value or explicit value disables it. Good for `One2many` lines created in batch; counterproductive when records are created one-by-one (loses prefetch batching).
 - `recursive=True` — **required** when the field depends on itself through a relation (`parent_id.x`). Must be explicit or recomputation is wrong.
 - `inverse='_method'` — makes a non-stored/computed field writable; the inverse persists the assignment.
 - `search='_method'` — makes a non-stored field searchable. Receives `(operator, value)`, returns a domain, or `return NotImplemented` for unsupported operators. Domain optimizations run first (e.g. `=` becomes `in`).
+
+### Storage decision order
+
+Take the first one that works:
+
+1. plain `compute` — the value is only ever read per record
+2. `compute` + `search='_method'` — it must be searchable (group/sort still need storage)
+3. `compute` + `store=True` — it must be grouped or sorted, or it is stable and read far more often than written
+
+`store=True` is the expensive option: a column, an index, recompute traffic on every
+dependency write, and a stale-data risk. Do not reach for it just to enable a filter.
 
 **Rules:**
 - Compute methods assign the field for *every* record in `self`.
@@ -94,6 +107,10 @@ Key compute attributes (`fields.py`):
 - `@api.depends` cannot depend on `'id'` (raises `NotImplementedError`).
 - `@api.depends` also accepts a single callable returning the dependency list (for dynamic deps).
 - Store only when the field is searched/grouped/listed or expensive and stable.
+- Repairing a stale stored compute: `env.add_to_compute(field, records)` + flush recomputes only
+  that field; stored fields depending on it are **not** marked, because the dependency chain is
+  marked when an input changes, not when a recompute changes a value. Use
+  `records.modified([input_field])` + flush to mark the whole chain, or add every dependent field.
 
 ### Context-dependent computes
 
@@ -133,7 +150,7 @@ partner_id = fields.Many2one('res.partner', ondelete='restrict', check_company=T
 - `bypass_search_access=True` — skip comodel access-rule checks during search. Security-sensitive; justify with a comment.
 - `domain`, `context` — client-side candidate filtering / context.
 
-> `auto_join` was **removed** in v19. Relational filtering now uses the `any` / `not any` domain operators and the search-access model (see `orm.md` section 4).
+> `auto_join` was **removed**. Relational filtering now uses the `any` / `not any` domain operators and the search-access model (see `orm.md` section 4).
 
 ### One2many
 
@@ -197,6 +214,8 @@ logo = fields.Image('Logo', max_width=1920, max_height=1920)
 ```
 
 **Binary:**
+- Values are base64: write `base64.b64encode(raw_bytes)`, read `base64.b64decode(record.file)`. The stored
+  attachment exposes the same base64 as `ir.attachment.datas` (raw bytes in `raw`).
 - `attachment=True` (default) stores the value as an `ir.attachment`, not a table column. `attachment=False` stores it in a `bytea` column. A non-stored binary forces `attachment=False`.
 - `prefetch=False` by default — blobs are never batch-loaded.
 - With `bin_size=True` in context (or `bin_size_<field>`), reads return the human-readable size instead of the content — use it in list views to avoid loading blobs.
@@ -267,14 +286,29 @@ def _onchange_partner_id(self):
 - Do **not** call `create`/`read`/`write`/`unlink` on the pseudo-record — assign fields or use `update()`.
 - A `One2many`/`Many2many` field cannot modify itself via onchange (webclient limitation).
 - Return `{'warning': {...}}` to surface a dialog/notification.
+- A value assigned to a field that is **not in the form view** is not sent back and not
+  saved, and its own onchanges do not cascade: `onchange()` diffs and cascades over
+  `fields_spec` only ([web/models/models.py:2185-2196](../../../../addons/web/models/models.py#L2185)).
+  Put the field in the view (`invisible="1"`) or make it a compute.
 
 ---
 
 ## 12. v19 Field Changes
 
-| Old | New (v19) | Notes |
+| Old | New | Notes |
 |---|---|---|
-| `group_operator='sum'` | `aggregator='sum'` | Deprecated since 18.0; warns |
-| `auto_join=True` | _(removed)_ | Use `any`/`not any` domain operators + `bypass_search_access` |
-| `index=True` only | `index='btree_not_null'` / `'trigram'` | Pick the index kind to fit the query |
-| `fields.Date.today()` (default) | `fields.Date.today` | Callable, no parens |
+| `uom.rounding` | `env['decimal.precision'].precision_get('Product Unit')` | `rounding` is now a compatibility compute of that precision |
+| `digits='Product Price'` for display only | `min_display_digits='Product Price'` | controls the minimum decimals shown |
+| `group_operator='sum'` | `aggregator='sum'` | deprecated since 18.0; warns |
+| `auto_join=True` | `bypass_search_access=True` | plus `any` / `not any` domain operators |
+| `index=True` only | `index='btree_not_null'` / `'trigram'` | pick the index kind to fit the query |
+| `fields.Date.today()` (default) | `fields.Date.today` | callable, no parens |
+
+Rounding quantities in v19:
+
+```python
+digits = self.env['decimal.precision'].precision_get('Product Unit')
+fields.Float.round(self.product_uom_qty, precision_digits=digits)
+fields.Float.is_zero(self.product_uom_qty, precision_digits=digits)
+fields.Float.compare(self.product_uom_qty, self.qty_done, precision_digits=digits)
+```

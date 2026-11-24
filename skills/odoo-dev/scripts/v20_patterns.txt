@@ -1,0 +1,31 @@
+\bir\.access\b
+,\s*['"]access['"]\s*,
+\bcompute_sql=
+models\.CachedModel\b
+\bTableSQL\b
+\.(get|set)_(str|bool|int|float)\(
+user_writeable=
+\bapi\.ormcache\b
+from odoo\.api import .*\bormcache\b
+invalidate_ormcache\(
+\btools\.func import .*\bdeprecated\b
+\btyping\.Self\b|from typing import .*\bSelf\b
+dispatcher\.serialize_exception
+odoo\.tools\.duplicate|tools import .*\bduplicate\b
+\bBinary(Value|Bytes)\b
+\bMockHTTPClient\b
+<card[ >]
+class="oi" data-icon=
+icon="(search|refresh|edit_square|add|delete|check|close)"
+import \{[^}]*\bproxy\b[^}]*\} from "@odoo/owl"
+\buseProps\(
+\buseListener\(
+\buseLayoutEffect\(
+@web/owl2/utils
+\bsignal\.ref\(
+t-call-slot
+t-custom-portal
+t-ref="this\.
+['"]version['"]\s*:\s*['"]20\.
+^\s*(def|class) \w+\[
+^type \w+ = 

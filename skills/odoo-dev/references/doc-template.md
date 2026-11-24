@@ -111,6 +111,12 @@ Write it as: "Enable X to get Y behavior. Without it, Z happens instead.">
 
 ---
 
+## Design Decisions
+
+- **<Decision>:** <Why we built it this way instead of the obvious alternative — business rule or core constraint that a future change must not break.>
+
+---
+
 ## Gotchas & Non-Obvious Behavior
 
 - **<Topic>:** <Something that surprises people or causes confusion. Be specific.>

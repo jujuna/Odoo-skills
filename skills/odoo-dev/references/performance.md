@@ -1,4 +1,4 @@
-# Performance Patterns — Odoo 19+
+# Performance Patterns — Odoo 19
 
 ## Table of Contents
 
@@ -232,22 +232,42 @@ records = self.search_fetch(domain, ['partner_id', 'state'], order='id')
 
 ## 5. Computed Fields Strategy
 
-### When to store:
+### `search=` before `store=True`
+
+The reflex "it needs to be searchable, so store it" is often wrong. When the value can be
+expressed as a domain, a `search=` method makes the computed field filterable with **no column,
+no recompute traffic and no staleness** (core: `sale/models/sale_order_line.py:94`).
+
+```python
+product_template_id = fields.Many2one(
+    'product.template',
+    compute='_compute_product_template_id',
+    search='_search_product_template_id',
+)
+
+def _search_product_template_id(self, operator, value):
+    return [('product_id.product_tmpl_id', operator, value)]
+```
+
+A `search=` field filters but does not group or sort; group-by and list sorting need `store=True`.
+Decision order: plain compute → `search='_method'` → `store=True`.
+
+### When storing is still right:
 ```python
 # STORE when:
-# - Field is used in search/filter/group_by
-# - Field is displayed in list views (computed per page load)
-# - Computation is expensive
-# - Dependencies change infrequently
+# - the field is grouped by or sorted on
+# - the value cannot be expressed as a domain
+# - it is read far more often than its dependencies change
+# - the computation is genuinely expensive and its inputs are stable
 total = fields.Float(compute='_compute_total', store=True)
 ```
 
 ### When NOT to store:
 ```python
 # DON'T STORE when:
-# - Dependencies change on almost every write
-# - Field is only on form view (single record)
-# - Storage cost outweighs computation cost
+# - dependencies change on almost every write
+# - the field is only shown on a form view (single record)
+# - the value is time-dependent (it silently goes stale)
 current_age = fields.Integer(compute='_compute_current_age')  # changes daily
 ```
 
@@ -315,6 +335,42 @@ for record in self:
 self.write({'field_a': value_a, 'field_b': value_b})
 ```
 
+### Sync loops: write only what changed, group what is equal
+
+A per-row `write()` in a sync/upsert loop is the most common slow pattern we produce.
+What one `write()` costs:
+- Python, per call, even when every value is equal: `check_access`, `_check_field_access` per field, `modified()`,
+  `_validate_fields`, `_check_company` ([models.py:4340-4524](../../../../odoo/orm/models.py#L4340)).
+- SQL: equal business values are dropped ([fields.py:1511-1514](../../../../odoo/orm/fields.py#L1511)), but
+  `write()` always sets `write_date` / `write_uid` ([models.py:4400-4402](../../../../odoo/orm/models.py#L4400)), so the
+  row is still dirty and gets an UPDATE.
+- The flush batches dirty rows: one `UPDATE ... FROM (VALUES ...)` per set of written fields, 100 rows per statement
+  ([models.py:4530-4615](../../../../odoo/orm/models.py#L4530), `UPDATE_BATCH_SIZE`). Different values per row are fine
+  there — the cost is the per-call Python work and the needless rows.
+
+```python
+# BAD — every existing row is written on every run, changed or not
+for line in lines:
+    res = existing.get(key(line))
+    if res:
+        res.write(vals_for(line))
+
+# GOOD — compare first, group identical values, one write per group
+updates = defaultdict(list)
+for line in lines:
+    res, vals = existing.get(key(line)), vals_for(line)
+    if res and any(res[f] != v for f, v in vals.items()):   # Monetary: currency.compare_amounts
+        updates[frozenset(vals.items())].append(res.id)
+for vals, ids in updates.items():
+    Model.browse(ids).write(dict(vals))
+Model.create(to_create)                                       # one create for all new rows
+stale.filtered(lambda r: r.status != 'cancelled').write({'status': 'cancelled'})   # not a loop
+```
+
+Batch a core call across records, not across arguments it takes one at a time: `pricelist._get_products_price(products,
+qty, date=d)` prices many products in one call but takes one `date` — one call per date is the minimum; never
+re-implement `_compute_price_rule` to batch dates.
+
 ### Use with_context to skip unnecessary operations:
 ```python
 # Skip mail notifications during bulk import
@@ -325,7 +381,7 @@ records.with_context(mail_create_nolog=True, tracking_disable=True).create(vals_
 
 ## 7. Database Indexes
 
-### v19 syntax for indexes:
+### Index syntax:
 ```python
 class MyModel(models.Model):
     _name = 'my.model'
@@ -336,7 +392,7 @@ class MyModel(models.Model):
     state = fields.Selection([...], index=True)
     date = fields.Date(index=True)
 
-    # Composite indexes (v19): declare named class attributes
+    # Composite indexes: declare named class attributes
     _partner_state_idx = models.Index("(partner_id, state)")
     _company_date_idx = models.Index("(company_id, date)")
 ```
@@ -443,13 +499,13 @@ size_str = record.with_context(bin_size=True).document  # e.g. "2.10 Mb", not th
 
 ### Enable Odoo profiling:
 ```python
-# In your method, for debugging:
-from odoo.tools.profiler import profile
+# In your method, for debugging (odoo/tools/profiler.py:508 — there is no `profile` decorator):
+from odoo.tools.profiler import Profiler
 
-@profile('/tmp/my_profile.log')
 def action_heavy_computation(self):
     """Profile this method to find bottlenecks."""
-    ...
+    with Profiler(db=self.env.cr.dbname, collectors=['sql', 'traces_async']):
+        ...
 ```
 
 ### Quick query counting:
@@ -476,7 +532,7 @@ def action_debug_performance(self):
 
 ## 11. Relational Search Access
 
-In Odoo 19, use `bypass_search_access` intentionally on relational fields when you
+Use `bypass_search_access` intentionally on relational fields when you
 need to bypass comodel search access checks. This is primarily a security behavior,
 not a generic performance switch.
 
@@ -497,7 +553,7 @@ class MyModel(models.Model):
 - Prefer normal relational fields (default access checks) in business code
 - Treat `bypass_search_access=True` as security-sensitive and justify it with a comment
 - Optimize search performance with proper domains and indexes, not access-bypass flags
-- `auto_join` was removed in v19. To filter on related records efficiently, use the `any` / `not any` domain operators (see `orm.md` section 4) rather than the old join flag.
+- `auto_join` was removed. To filter on related records efficiently, use the `any` / `not any` domain operators (see `orm.md` section 4) rather than the old join flag.
 
 ---
 
@@ -508,12 +564,7 @@ subsets of a large recordset.
 
 ```python
 def _process_in_chunks(self, records):
-    """Process records with controlled prefetch groups.
-
-    By default, accessing ANY field on one record prefetches that field
-    for ALL records in the same recordset. For 100k records, this loads
-    100k values into memory even if you process 100 at a time.
-    """
+    """Process records in prefetch groups, so each batch loads only its own values."""
     chunk_size = 200
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]

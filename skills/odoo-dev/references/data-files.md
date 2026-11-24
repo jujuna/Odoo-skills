@@ -1,4 +1,4 @@
-# Data Files — Odoo 19+
+# Data Files — Odoo 19
 
 ## Table of Contents
 
@@ -39,7 +39,7 @@
 |---|---|
 | `id` | XML ID — unique within module, used for `ref()` |
 | `model` | Target model |
-| `forcecreate` | If `"0"`, skip if record already exists |
+| `forcecreate` | If `"0"`, only update an existing record — **never create** if missing (`convert.py:377,386`) |
 
 ---
 
@@ -128,7 +128,7 @@ eval="[(5, 0, 0)]"
     <!-- Records that must always match code — overwritten on update -->
     <record id="..." model="ir.ui.view">...</record>
     <record id="..." model="ir.actions.act_window">...</record>
-    <record id="..." model="ir.model.access">...</record>
+    <record id="..." model="ir.rule">...</record>
     <record id="..." model="res.groups">...</record>
 </data>
 ```
@@ -138,13 +138,31 @@ eval="[(5, 0, 0)]"
 | Record type | noupdate? | Why |
 |---|---|---|
 | Views, actions, menus | No | Must stay in sync with code |
-| Security groups, ACLs | No | Must stay in sync with code |
+| Security groups, ACLs, record rules | No | Must stay in sync with code |
 | Cron jobs | Yes | Admin may change schedule |
 | Mail templates | Yes | Admin may customize text |
 | Sequences | Yes | Admin may change prefix/padding |
 | Config parameters | Yes | Admin sets values |
 | Default data records | Yes | Users may modify them |
 | Demo data | Yes | Never overwrite |
+
+### Removing a field together with its view
+
+`_process_end` deletes the module's obsolete view only at the **end** of the whole `-u`. If the same run also
+upgrades another module whose view inherits the same parent form (a dependent pulled in by the cascade), that view is
+validated against the combined arch, which still holds the obsolete view naming the removed field: "Field ... does not
+exist", registry fails. Deploy in two steps: first hide the field (`invisible="1"`, field still in Python)
+and run the big `-u`; then delete field and view and run `-u` of that module alone. Rehearse the exact `-u` list on a
+copy, not a smaller one.
+
+### Removing a record from a data file
+
+`-u` deletes a record that disappeared from the module's data only when its `ir.model.data` row has
+`noupdate = False` ([ir_model.py:2657](../../../../odoo/addons/base/models/ir_model.py#L2657) `_process_end`).
+A `noupdate` row stays in the database for good: editing or deleting a `noupdate="1"` record in XML
+never reaches an installed database, so the fix needs a manual step there (archive, or delete on
+the user's go). Check the real flag with `SELECT noupdate FROM ir_model_data WHERE module=... AND name=...`
+before predicting what an upgrade does: core code can flip it.
 
 ---
 
@@ -154,9 +172,16 @@ eval="[(5, 0, 0)]"
 
 ```csv
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_my_model_user,my.model.user,model_my_model,my_module.group_user,1,1,1,0
-access_my_model_manager,my.model.manager,model_my_model,my_module.group_manager,1,1,1,1
+access_my_model_user,my.model user,model_my_model,my_module.group_user,1,1,1,0
+access_my_model_manager,my.model manager,model_my_model,my_module.group_manager,1,1,1,1
 ```
+
+- `model_id:id` is the `model_` xml id (dots as underscores), not the model name
+- an empty `group_id:id` grants **every** user, portal and public included
+- record filtering (multi-company, own records) is an `ir.rule` in XML, not a CSV column
+- this file goes right after the groups file in the manifest `data` list
+
+Full semantics: `security.md`.
 
 ### Bulk data CSV
 
@@ -238,7 +263,7 @@ def create(self, vals_list):
 | `datetime`, `dateutil` | Date utilities |
 | `time` | Python time module |
 | `log` | Logger function |
-| `Warning` | `odoo.exceptions.UserError` |
+| `UserError` | `odoo.exceptions.UserError` (`ir_actions.py:1142`; legacy `Warning` was removed) |
 | `action` | Set this to return an action dict |
 
 ### Email server action
@@ -247,7 +272,7 @@ def create(self, vals_list):
 <record id="action_send_reminder" model="ir.actions.server">
     <field name="name">Send Reminder</field>
     <field name="model_id" ref="model_my_model"/>
-    <field name="state">email</field>
+    <field name="state">mail_post</field>
     <field name="template_id" ref="email_template_reminder"/>
 </record>
 ```
@@ -256,9 +281,19 @@ def create(self, vals_list):
 
 ## 7. Automated Actions
 
-Automated actions trigger on record events (create, write, delete, timed).
+Automated actions (`base.automation`) trigger on record events and execute one or more linked `ir.actions.server` records via `action_server_ids` (`base_automation.py:153`).
 
 ```xml
+<record id="server_action_auto_assign" model="ir.actions.server">
+    <field name="name">Auto-assign on Confirm</field>
+    <field name="model_id" ref="model_my_model"/>
+    <field name="state">code</field>
+    <field name="code">
+        if not record.user_id:
+            record.user_id = env.user
+    </field>
+</record>
+
 <record id="auto_action_on_confirm" model="base.automation">
     <field name="name">Auto-assign on Confirm</field>
     <field name="model_id" ref="model_my_model"/>
@@ -266,11 +301,7 @@ Automated actions trigger on record events (create, write, delete, timed).
     <field name="trigger_field_ids" eval="[(4, ref('field_my_model__state'))]"/>
     <field name="filter_domain">[('state', '=', 'confirmed')]</field>
     <field name="filter_pre_domain">[('state', '=', 'draft')]</field>
-    <field name="state">code</field>
-    <field name="code">
-        if not record.user_id:
-            record.user_id = env.user
-    </field>
+    <field name="action_server_ids" eval="[Command.link(ref('server_action_auto_assign'))]"/>
 </record>
 ```
 
@@ -288,6 +319,13 @@ Automated actions trigger on record events (create, write, delete, timed).
 ### Timed trigger
 
 ```xml
+<record id="server_action_mark_overdue" model="ir.actions.server">
+    <field name="name">Mark Overdue</field>
+    <field name="model_id" ref="model_my_model"/>
+    <field name="state">code</field>
+    <field name="code">record.write({'is_overdue': True})</field>
+</record>
+
 <record id="auto_action_overdue" model="base.automation">
     <field name="name">Mark Overdue</field>
     <field name="model_id" ref="model_my_model"/>
@@ -296,8 +334,7 @@ Automated actions trigger on record events (create, write, delete, timed).
     <field name="trg_date_range">1</field>
     <field name="trg_date_range_type">day</field>
     <field name="filter_domain">[('state', '=', 'confirmed')]</field>
-    <field name="state">code</field>
-    <field name="code">record.write({'is_overdue': True})</field>
+    <field name="action_server_ids" eval="[Command.link(ref('server_action_mark_overdue'))]"/>
 </record>
 ```
 
@@ -358,32 +395,35 @@ Demo data is only loaded when the database is created with "Load demonstration d
 
 ## 10. Manifest Data Order
 
+Groups first, ACLs right after them:
+
 ```python
 'data': [
-    # 1. Security — ALWAYS first
-    'security/groups.xml',
+    # 1. Groups, privileges, record rules, then ACLs — ALWAYS first
+    'security/my_module_security.xml',
     'security/ir.model.access.csv',
-    'security/rules.xml',
 
     # 2. Core data
-    'data/sequence_data.xml',
-    'data/cron_data.xml',
+    'data/ir_sequence_data.xml',
+    'data/ir_cron_data.xml',
     'data/mail_template_data.xml',
 
     # 3. Reports and wizards
     'report/my_report_templates.xml',
     'wizards/my_wizard_views.xml',
 
-    # 4. Views, actions, menus — LAST
+    # 4. Views, actions, menus
     'views/my_model_views.xml',
-    'views/menu.xml',
+    'views/my_model_menus.xml',
 ],
 ```
 
-**Why this order matters:**
-- Security groups must exist before views that reference them
-- Data records must exist before views that use them as defaults
-- Views/menus reference actions that reference models — all must exist first
+**Why:**
+- ACLs, views, menus and actions reference groups, so groups load first
+- Menus reference actions, so menu files come after the view files that define them
+
+Verified in `account`, `stock`, `project`, `hr`, `purchase`: the groups file is manifest
+entry 0 and `security/ir.model.access.csv` entry 1.
 
 ---
 
@@ -408,7 +448,7 @@ Demo data is only loaded when the database is created with "Load demonstration d
 
 <!-- List/tuple -->
 <field name="partner_ids" eval="[(4, ref('base.main_partner'))]"/>
-<field name="users" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
+<field name="user_ids" eval="[(4, ref('base.user_root')), (4, ref('base.user_admin'))]"/>
 ```
 
 ### Available modules in eval
@@ -437,14 +477,14 @@ Demo data is only loaded when the database is created with "Load demonstration d
 </function>
 ```
 
-### Conditional record (forcecreate)
+### Update-only record (`forcecreate="0"`)
 
 ```xml
-<!-- Only create if this XML ID doesn't already exist -->
-<record id="default_config" model="ir.config_parameter" forcecreate="0">
-    <field name="key">my_module.setting</field>
-    <field name="value">default_value</field>
+<!-- Only update if this XML ID already exists; NEVER creates a missing record -->
+<record id="base.main_company" model="res.company" forcecreate="0">
+    <field name="report_footer">Updated footer</field>
 </record>
+<!-- To create once and never overwrite on upgrade, use <data noupdate="1"> instead -->
 ```
 
 ---
@@ -457,12 +497,13 @@ Demo data is only loaded when the database is created with "Load demonstration d
 # BAD — views reference groups that don't exist yet
 'data': [
     'views/my_model_views.xml',
-    'security/groups.xml',        # too late!
+    'security/my_module_security.xml',   # too late
+    'security/ir.model.access.csv',
 ]
 
 # GOOD — security first
 'data': [
-    'security/groups.xml',
+    'security/my_module_security.xml',
     'security/ir.model.access.csv',
     'views/my_model_views.xml',
 ]

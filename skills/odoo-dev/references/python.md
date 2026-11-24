@@ -1,4 +1,4 @@
-# Python Best Practices — Odoo 19+ (Python 3.10+)
+# Python Best Practices — Odoo 19 (Python 3.10+)
 
 This file covers the Python language layer for Odoo code. For ORM-specific
 contracts (recordsets, CRUD overrides, domains, transactions, multi-company),
@@ -29,36 +29,10 @@ load `references/orm.md` first.
 
 ## 1. Type Hints in Odoo
 
-Odoo core does NOT use type hints extensively, but for custom modules they
-improve readability and IDE support. Use them on private/utility methods —
-skip on ORM overrides (the framework types are complex).
-
-```python
-from collections.abc import Iterable
-
-def _prepare_invoice_values(self) -> dict:
-    """Prepare dictionary for account.move creation."""
-    self.ensure_one()
-    return {
-        'partner_id': self.partner_id.id,
-        'move_type': 'out_invoice',
-    }
-
-def _get_partner_ids_from_domain(self, domain: list) -> list[int]:
-    """Extract partner IDs matching the given domain."""
-    return self.env['res.partner'].search(domain).ids
-
-def _split_into_batches(self, records, size: int = 200) -> Iterable:
-    """Yield successive batches of the given size."""
-    for i in range(0, len(records), size):
-        yield records[i:i + size]
-```
-
-**Rules:**
-- Use on private helpers and utility methods
-- Skip on `create`, `write`, `unlink`, `search` overrides (signature is defined by ORM)
-- Use `dict` not `Dict`, `list` not `List` (Python 3.10+)
-- Use `X | None` not `Optional[X]` (Python 3.10+)
+Match the file you are in: add type hints only where the surrounding code already uses them
+(core model code rarely does, our modules do not). Where a file does, write `dict` / `list` /
+`X | None` (not `Dict` / `List` / `Optional[X]`) and leave ORM override signatures
+(`create`, `write`, `unlink`, `search`) unannotated.
 
 ---
 
@@ -103,6 +77,7 @@ def _cron_process_all(self):
     for batch in self._iter_mutating_pending_records(batch_size=200):
         batch._process_batch()
         # Commit only in resumable cron/import/migration jobs, never in requests.
+        # _can_commit() is a module helper (not on BaseModel; see transactions.md §2).
         if self._can_commit():
             self.env.cr.commit()
             self.env.invalidate_all()
@@ -191,7 +166,7 @@ value = my_dict.get(key, default_value)
 
 # Accumulating in a dict
 vals = {}
-vals.setdefault('invoice_line_ids', []).append((0, 0, line_vals))
+vals.setdefault('invoice_line_ids', []).append(Command.create(line_vals))
 ```
 
 ### Tuple unpacking in loops:
@@ -236,20 +211,35 @@ for record, vals in zip(records, vals_list):
 
 ### Translation-safe string formatting:
 ```python
-from odoo import _
-
-# CORRECT — %s inside _() for translation extraction
-msg = _("Order %s cannot be deleted (state: %s).", self.name, self.state)
+# CORRECT — self.env._() needs no import and uses the env's language
+msg = self.env._("Order %s cannot be deleted (state: %s).", self.name, self.state)
 
 # CORRECT — named placeholders for complex messages
-msg = _("%(count)s orders for partner %(partner)s.", count=len(self), partner=self.partner_id.name)
+msg = self.env._("%(count)s orders for %(partner)s.", count=len(self), partner=self.partner_id.name)
 
-# WRONG — f-string breaks translation tooling
-msg = _(f"Order {self.name} cannot be deleted.")
+# WRONG — f-string breaks translation extraction
+msg = self.env._(f"Order {self.name} cannot be deleted.")
 
 # WRONG — .format() also breaks extraction
-msg = _("Order {} cannot be deleted.".format(self.name))
+msg = self.env._("Order {} cannot be deleted.".format(self.name))
 ```
+
+`self.env._()` is the preferred form in v19+ and is what new core code uses. The imported
+`from odoo import _` reads the language from the caller's `context` / `kwargs` / `self.env`
+locals (`odoo/tools/translate.py` `_get_lang`); do not mix the two styles inside one file.
+Never name a placeholder `source` or `self` with `self.env._()`: they collide with its own parameters
+(`odoo/orm/environments.py:315`) and raise `TypeError`. The imported `_` allowed `source=`, so conversions hit this
+(see refactor.md section 5).
+
+| Where the text is | Use | Why |
+|---|---|---|
+| method with `self` | `self.env._("...")` | env language, no import |
+| module-level helper (no `self`) | pass `env`, call `env._("...")` | bare `_()` there uses the HTTP request's language when there is one; in a cron it logs a warning and returns English |
+| module-level constant | `_lt = LazyTranslate(__name__)`, `LABEL = _lt("...")`, later `env._(LABEL)` | translated when used, not at import (`translate.py:661`; core: `base_vat/models/res_partner.py:19`) |
+
+Code translations are looked up by (addon of the calling file, exact source text)
+(`translate.py:419` `get_translation`): moving a text inside one addon keeps its translation; rewording it,
+or moving it into another addon, loses it until that addon's `.po` has it.
 
 ### String building for large outputs:
 ```python
@@ -389,19 +379,12 @@ valid = [
 
 ## 9. Match Statements
 
-Python 3.10+ structural pattern matching — useful for state machines and
+Structural pattern matching — useful for state machines and
 dispatchers in Odoo.
 
 ```python
 def _get_next_state(self) -> str:
-    """Determine the next workflow state.
-
-    Returns:
-        str: The next state value.
-
-    Raises:
-        UserError: If current state has no valid transition.
-    """
+    """Return the next state; raise UserError when the current state has no transition."""
     match self.state:
         case 'draft':
             return 'confirmed'
@@ -584,27 +567,22 @@ def write(self, vals):
     return result
 ```
 
-### copy() — handle duplication:
+### copy_data() — batch-safe duplication (prefer over overriding copy()):
 ```python
-def copy(self, default=None):
-    """Duplicate with modified name and reset state."""
-    self.ensure_one()
-    default = dict(default or {})
-    default.setdefault('name', _("%s (copy)", self.name))
-    return super().copy(default)
+def copy_data(self, default=None):
+    """Duplicate with modified name (batch-safe; models.py:5425)."""
+    vals_list = super().copy_data(default=default)
+    return [dict(vals, name=self.env._("%s (copy)", rec.name)) for rec, vals in zip(self, vals_list)]
 ```
 
-### _name_search — custom search-as-you-type:
+### _search_display_name — custom search-as-you-type (`_name_search` was removed in Odoo 19):
 ```python
-def _name_search(self, name='', domain=None, operator='ilike', limit=None, order=None):
-    """Allow searching by reference code or name.
-
-    This is called when typing in a Many2one field.
-    """
-    domain = domain or []
-    if name:
-        domain = ['|', ('name', operator, name), ('code', operator, name)] + domain
-    return self._search(domain, limit=limit, order=order)
+@api.model
+def _search_display_name(self, operator, value):
+    """Allow searching by reference code or name (models.py:1455)."""
+    if operator == 'ilike' and value:
+        return Domain('name', operator, value) | Domain('code', operator, value)
+    return super()._search_display_name(operator, value)
 ```
 
 ### _rec_name and _rec_names_search:
@@ -612,8 +590,8 @@ def _name_search(self, name='', domain=None, operator='ilike', limit=None, order
 class ProductVariant(models.Model):
     _name = 'product.variant'
     _description = 'Product Variant'
-    _rec_name = 'display_name'  # field used for display_name
-    _rec_names_search = ['name', 'default_code', 'barcode']  # fields searched in name_search
+    _rec_name = 'name'  # stored field used by _compute_display_name (never 'display_name'!)
+    _rec_names_search = ['name', 'default_code', 'barcode']  # fields searched by display_name
 ```
 
 ---
@@ -770,30 +748,9 @@ _logger = logging.getLogger(__name__)
 
 ### Comments and docstrings
 
-Write self-explanatory code; lean on naming, not narration.
-
-```python
-# GOOD — one-line docstring states intent; no comment restating the code
-def _prepare_invoice_values(self):
-    """Build account.move values for this order."""
-    self.ensure_one()
-    return {'partner_id': self.partner_id.id, 'move_type': 'out_invoice'}
-
-# AVOID — multi-paragraph docstring for a trivial method, comments narrating obvious code
-def _prepare_invoice_values(self):
-    """
-    This method prepares and returns the dictionary of values that will
-    later be used to create the customer invoice for the current order...
-    """
-    self.ensure_one()                       # make sure it is a single record
-    return {'partner_id': self.partner_id.id}  # return the values dict
-```
-
-**Rules:**
-- Docstrings: one short line stating what the method does. Expand only for non-obvious behavior (transaction/security/performance choices, surprising side effects).
-- Comments: only when naming cannot make the code self-explanatory. Keep them short and explain *why*, not *what*.
-- Do not narrate obvious code or restate the method name in prose.
-- Do not add docstrings, comments, or type annotations to code you did not change.
+`SKILL.md` Hard Rule 11, details in `compact-code.md`: no module docstrings, a method
+docstring only for a why (one line, three at most), no narrating comments, statements on one
+line up to 120 characters, nothing added to code you did not change.
 
 ### Method shape
 
@@ -874,20 +831,24 @@ def _send_payload(self, payload):
 ### Constants and tooling
 
 ```python
-# BAD — magic numbers/strings scattered through logic
-if order.amount_total > 1000 and order.state == 'sale':
+# BAD: a business limit in code; changing it needs a code change and a deploy
+if order.amount_total > 5000 and order.state in ('draft', 'sent'):
     ...
 
-# GOOD — named constants; frozenset/tuple for fixed collections
-LARGE_ORDER_THRESHOLD = 1000.0
-CONFIRMED_STATES = frozenset(('sale', 'done'))
+# GOOD: the limit lives on the company and is edited in Settings (core: purchase
+# po_double_validation_amount); the state list is a technical constant, named once
+TO_APPROVE_STATES = frozenset(('draft', 'sent'))
 
-if order.amount_total > LARGE_ORDER_THRESHOLD and order.state in CONFIRMED_STATES:
+if order.amount_total > order.company_id.po_double_validation_amount and order.state in TO_APPROVE_STATES:
     ...
 ```
 
 **Rules:**
-- Name magic numbers/strings as module-level constants; use `frozenset`/`tuple` for fixed sets, not mutable `list`/`dict`.
+- A business value (rate, amount, limit, date, account, tax, record id or name) is data, not
+  a constant: read it from the record that owns it (`SKILL.md` Hard Rule 7, `simplicity.md`
+  section 7).
+- Technical constants (selection states, field names, an external API's element names) are
+  module-level and defined once; `frozenset`/`tuple` for fixed sets, not mutable `list`/`dict`.
 - Module-level names must be immutable (see section 13 on global mutable state).
 - Format and lint with `ruff format` + `ruff check` before committing — keep style machine-enforced, not hand-argued.
 
@@ -937,6 +898,85 @@ def _prepare_lines_by_product(self):
 - Build maps/sets once; do not recompute the same lookup in every iteration.
 - Keep recordsets as recordsets until IDs are required for SQL, RPC, or serialization.
 - Avoid "smart" abstractions unless they remove real duplication or make batch behavior safer.
+
+### Collapse redundant branches; keep distinct ones
+
+Merge guards and branches that are the *same* thing written several times; keep
+branches that genuinely *differ*. The wins below are behavior-preserving — apply
+them; the guardrails after are where merging silently breaks things — respect them.
+
+```python
+# BAD — consecutive guards with an identical body
+if self.move_type not in ('out_refund', 'in_refund'):
+    return
+if self.rs_einv_k_type_user_set:
+    return
+if self.rs_einv_k_type:
+    return
+self.rs_einv_k_type = self._suggest_k_type()
+
+# GOOD — one guard. `A or B or C` short-circuits exactly like the sequential
+# ifs, so a later condition (even one that calls a method) still runs only when
+# the earlier ones are False. Identical behavior.
+if (self.move_type not in ('out_refund', 'in_refund')
+        or self.rs_einv_k_type_user_set
+        or self.rs_einv_k_type):
+    return
+self.rs_einv_k_type = self._suggest_k_type()
+```
+
+```python
+# BAD — if/else assigns the SAME fields, differing only in which side is seller
+if is_buyer_side:
+    move.seller_tin = move.partner_id.vat or False
+    move.seller_name = move.partner_id.name or False
+    move.buyer_tin = move.company_id.vat or False
+    move.buyer_name = move.company_id.name or False
+else:
+    move.seller_tin = move.company_id.vat or False
+    move.seller_name = move.company_id.name or False
+    move.buyer_tin = move.partner_id.vat or False
+    move.buyer_name = move.partner_id.name or False
+
+# GOOD — pick the operands once, assign once
+seller, buyer = (
+    (move.partner_id, move.company_id) if is_buyer_side
+    else (move.company_id, move.partner_id)
+)
+move.seller_tin = seller.vat or False
+move.seller_name = seller.name or False
+move.buyer_tin = buyer.vat or False
+move.buyer_name = buyer.name or False
+```
+
+```python
+# BAD — guard then else over one target           # BAD — branches set one field, then continue
+flag = getattr(result, 'someResult', None)         for line in self:
+if flag is None:                                       if not line.move_id.rs_einv_id:
+    success = bool(result)                                 line.state = 'not_sent'
+else:                                                       line.synced = False
+    success = bool(flag)                                    continue
+                                                       ...
+# GOOD — value-pick                                 # GOOD — elif over the target; derive the rest once
+success = bool(flag if flag is not None else result)  for line in self:
+                                                          if not line.move_id.rs_einv_id:
+                                                              line.state = 'not_sent'
+                                                          elif ...:
+                                                              line.state = ...
+                                                          else:
+                                                              line.state = ...
+                                                          line.synced = line.state in SYNCED_STATES
+```
+
+**Rules:**
+- Merge consecutive `if COND: return` / `continue` / `return X` guards that share an **identical body** into one `if A or B or ...:`. This is *always* behavior-preserving — `or` evaluates in the same order with the same short-circuit as the separate ifs, even when a condition has a side effect or calls a method.
+- Collapse if/else that assigns the **same target(s)** differing only by value into a ternary, or a `(a, b) if cond else (c, d)` value-pick, then assign once.
+- Turn a single-target guard cascade into one `if/elif/else` chain and compute any **derived** field once after it, instead of repeating that line in every branch.
+
+**Do NOT merge when:**
+- **Bodies differ** — guards that `raise` *different* `UserError`/`ValidationError` messages, or branches that set different dict *keys* / different fields / log different text. The specific message and shape is the whole point; keep them separate.
+- **Code sits between the guards** — an assignment between two `if`s means they are not consecutive; merging would reorder logic or skip a needed step.
+- **Readability drops** — do not fold a long multi-line expression into a trailing `... if cond else x`. A two-line if/else beats a cramped ternary.
 
 ### Avoid unnecessary allocations
 
@@ -1054,7 +1094,7 @@ for line in lines:
 - Clear names over clever abbreviations.
 - Small methods with one responsibility.
 - Explicit data shapes: `*_by_id`, `*_by_company`, `*_vals_list`.
-- Comments only for non-obvious transaction/security/performance choices.
+- The why in the method docstring; inline comments only for a non-obvious line.
 
 ---
 
@@ -1081,7 +1121,8 @@ def action_post_to_service(self):
 ```
 
 **Rules:**
-- Validate state, required fields, access, and company before payload creation.
+- Put the checks the call needs (state, required data, access, company) before payload creation;
+  only checks the task asked for or the user approved (`SKILL.md` Hard Rule 8).
 - Fail before external API calls, attachments, reports, or expensive aggregation.
 - Do not partially write records before validation unless the flow is explicitly resumable.
 
@@ -1185,6 +1226,7 @@ intentionally, and keep side effects visible.
 For pure, frequently-called, rarely-changing lookups (config resolution, permission maps, parsed metadata), cache the result with Odoo's registry-aware cache — never `functools.lru_cache` / `functools.cache`.
 
 ```python
+from odoo import models
 from odoo.tools import ormcache
 
 
@@ -1194,8 +1236,7 @@ class ResCompany(models.Model):
     @ormcache('self.env.company.id', 'feature_code')
     def _get_feature_setting(self, feature_code):
         """Return a cached primitive — never a recordset."""
-        param = self.env['ir.config_parameter'].sudo().get_param(f'mymod.{feature_code}')
-        return param or False
+        return self.env['ir.config_parameter'].sudo().get_param(f'mymod.{feature_code}') or False
 ```
 
 ### Why not `lru_cache`
@@ -1206,6 +1247,7 @@ class ResCompany(models.Model):
 - Arguments are string expressions over the method signature; they build the key (which always also includes `self._name` and the method). Examples: `'model_name'`, `'self.env.uid'`, `'self.env.company.id'`.
 - **Never return a recordset** — return ids, dicts, tuples, or scalars, and `browse()` again in the caller. A cached recordset raises `psycopg2.InterfaceError` once its cursor closes.
 - Cache only pure functions of the key: no side effects, and no context-sensitive result unless that context value is part of the key.
+- Import: `from odoo.tools import ormcache` (core also writes `@tools.ormcache(...)`).
 - Invalidate when the underlying data changes: `self.env.registry.clear_cache()` (or `clear_cache('name')` for one bucket, `clear_all_caches()` for everything).
-- `@ormcache(skiparg=...)` and `@ormcache_context(...)` are **deprecated since 19.0** — use `@ormcache(...)` and put context values in the key directly, e.g. `@ormcache('self.env.context.get("lang")')`.
-- Use `@ormcache(..., cache='name')` to put an entry in a named bucket you can invalidate independently.
+- `@ormcache(skiparg=...)` and `@ormcache_context(...)` are **deprecated since 19.0** (they warn) — put context values in the key directly, e.g. `@ormcache('self.env.context.get("lang")')`.
+- Use `@ormcache(..., cache='name')` for a named bucket you can invalidate independently. Core uses `'stable'` for access data (`ir.config_parameter`, `ir.model`) and `'groups'` for group implications.

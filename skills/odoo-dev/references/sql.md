@@ -1,4 +1,4 @@
-# SQL & PostgreSQL Patterns — Odoo 19+
+# SQL & PostgreSQL Patterns — Odoo 19
 
 ## Table of Contents
 
@@ -27,13 +27,12 @@
 | Reporting queries | Multi-table pivot, crosstab | ORM has no pivot support |
 | Performance-critical paths | Dashboard stats, cron counts | ORM adds Python overhead |
 | Schema inspection | Check column existence | Not an ORM concept |
-| Database-level locking | `SELECT ... FOR UPDATE SKIP LOCKED` | ORM has no locking API |
+| Exotic lock modes | Advisory locks / `FOR SHARE` | Standard row locks use ORM `lock_for_update()` / `try_lock_for_update()` (`models.py:5583,5611`) |
 
 **Every raw SQL call MUST have:**
-1. A comment explaining WHY the ORM cannot do the job
+1. One line, in the method docstring, saying why the ORM cannot do the job
 2. Parameterized queries (`%s` — NEVER string interpolation)
-3. A docstring documenting the query purpose
-4. Flush/invalidate/`modified()` discipline if SQL interacts with ORM-cached data
+3. Flush/invalidate/`modified()` discipline if SQL interacts with ORM-cached data
 
 ---
 
@@ -86,7 +85,8 @@ count = self.env.cr.fetchone()[0]
 
 ### Using the SQL builder (v18+):
 ```python
-from odoo.tools import SQL
+from odoo.tools import SQL           # composed, injection-safe SQL
+from odoo.tools import Query        # query object returned by _search()
 
 # SQL builder is injection-safe by construction
 query = SQL(
@@ -122,12 +122,7 @@ def _get_existing_partner_emails(self, emails: list[str]) -> set[str]:
 ### Bulk UPDATE bypassing ORM:
 ```python
 def _bulk_archive_old_records(self, cutoff_date):
-    """Archive records older than cutoff date.
-
-    Raw SQL justified: mass-update thousands of records without
-    triggering compute fields, tracking, and mail notifications
-    that ORM write() would fire.
-    """
+    """Archive old records by SQL: a mass update without computes, tracking and mail."""
     Model = self.env['my.model']
     Model.flush_model(['active', 'state', 'date'])
     self.env.cr.execute("""
@@ -193,26 +188,13 @@ def _upsert_partner_stats(self, partner_id, total_orders, total_amount):
     """, (partner_id, total_orders, total_amount))
 ```
 
-### Locking rows for concurrent processing:
+### Locking rows for concurrent processing (prefer ORM `try_lock_for_update()`):
 ```python
 def _claim_next_batch(self, batch_size: int = 50):
-    """Claim a batch of unprocessed records for this worker.
-
-    Uses SKIP LOCKED to allow multiple cron workers to process
-    different records concurrently without deadlocks.
-
-    Raw SQL justified: SELECT FOR UPDATE SKIP LOCKED not available in ORM.
-    """
-    self.env.cr.execute("""
-        SELECT id FROM queue_job
-        WHERE state = 'pending'
-        ORDER BY priority, id
-        LIMIT %s
-        FOR UPDATE SKIP LOCKED
-    """, (batch_size,))
-    ids = [row[0] for row in self.env.cr.fetchall()]
-    return self.browse(ids)
+    """Claim a batch of unprocessed records without deadlocks (models.py:5611)."""
+    return self.search([('state', '=', 'pending')], order='priority, id').try_lock_for_update(limit=batch_size)
 ```
+Use raw `SELECT ... FOR UPDATE SKIP LOCKED` only when locking across a custom SQL join or exotic lock mode that `try_lock_for_update()` cannot express (`transactions.md` §10).
 
 ---
 
@@ -360,7 +342,7 @@ SET auto_explain.log_analyze = true;
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
 
-    # v19 composite indexes for common query patterns
+    # composite indexes for common query patterns
     _partner_state_idx = models.Index("(partner_id, state)")
     _company_date_order_idx = models.Index("(company_id, date_order)")
     _state_create_date_idx = models.Index("(state, create_date)")
@@ -423,7 +405,7 @@ SET "state" = 'done',
     "write_uid" = 2
 WHERE "id" IN (1, 2, 3);
 -- THEN: recompute stored computed fields that depend on 'state'
--- THEN: create mail.tracking.value records for tracked fields
+-- THEN (precommit): post the tracking message with mail.tracking.value records for tracked fields
 -- THEN: flush all pending computations
 ```
 
@@ -445,9 +427,13 @@ GROUP BY "sale_order_line"."order_id";
 
 ## 8. Migrations and Data Scripts
 
+> **Not our practice.** Do not write migration scripts in this project (see `simplicity.md` section 12).
+> Handle data changes in code — a compute, a field default, or a fill-only-if-empty pass.
+> This section is reference-only, for reading migration scripts that already exist in `addons/`.
+
 ### Pre-migration script (runs BEFORE module update):
 ```python
-# migrations/19.0.1.1.0/pre-migrate.py
+# migrations/<version>/pre-migrate.py
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -468,7 +454,7 @@ def migrate(cr, version):
 
 ### Post-migration script (runs AFTER module update):
 ```python
-# migrations/19.0.1.1.0/post-migrate.py
+# migrations/<version>/post-migrate.py
 import logging
 from odoo import SUPERUSER_ID, api
 
@@ -492,14 +478,14 @@ def migrate(cr, version):
 
 ### End-migration script (runs at the very end):
 ```python
-# migrations/19.0.1.1.0/end-migrate.py
+# migrations/<version>/end-migrate.py
 # Use for operations that need the fully updated registry
 ```
 
 ### Migration folder naming:
 ```
 migrations/
-└── 19.0.1.1.0/          # matches new version in __manifest__.py
+└── <version>/           # matches the new version in __manifest__.py
     ├── pre-migrate.py    # before ORM update
     ├── post-migrate.py   # after ORM update
     └── end-migrate.py    # after all modules updated
